@@ -31,12 +31,11 @@ var (
 	dialogBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("205")).
-			Padding(1, 2).
+			Padding(0, 1).
 			Width(60)
 	dialogTitleStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("220")).
-				MarginBottom(1)
+				Foreground(lipgloss.Color("220"))
 	dialogOptionStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	dialogOptionSelectedStyle = lipgloss.NewStyle().
 					Bold(true).
@@ -600,13 +599,13 @@ func (m model) View() string {
 		var dialog strings.Builder
 
 		dialog.WriteString(dialogTitleStyle.Render("⚠️  File Already Exists"))
-		dialog.WriteString("\n\n")
+		dialog.WriteString("\n")
 		dialog.WriteString(normalStyle.Render("The output file already exists:"))
 		dialog.WriteString("\n")
 		dialog.WriteString(infoStyle.Render(filepath.Base(m.pendingOutputFile)))
-		dialog.WriteString("\n\n")
+		dialog.WriteString("\n")
 		dialog.WriteString(helpTextStyle.Render("What would you like to do?"))
-		dialog.WriteString("\n\n")
+		dialog.WriteString("\n")
 
 		options := []string{"Overwrite existing file", "Skip this file", "Cancel all"}
 		for i, opt := range options {
