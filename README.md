@@ -42,7 +42,7 @@ Processing... (c or ctrl+c to cancel)
 git clone <your-repo-url>
 cd compress-tui
 
-# Build the binary
+# Build the binary (dependencies download automatically)
 go build -o fideogo main.go
 
 # Move to your PATH (optional)
@@ -83,10 +83,23 @@ fideogo /path/to/videos/*.mov
 
 This project is built with the amazing [Charm](https://charm.sh/) ecosystem:
 
-- **[Bubble Tea](https://github.com/charmbracelet/bubbletea)** - The Elm-inspired TUI framework
-- **[Bubbles](https://github.com/charmbracelet/bubbles)** - Reusable TUI components
-- **[Lip Gloss](https://github.com/charmbracelet/lipgloss)** - Style definitions and terminal styling
-- **[go-colorful](https://github.com/lucasb-eyer/go-colorful)** - Color manipulation and interpolation
+### Core Libraries
+
+- **[Bubble Tea](https://github.com/charmbracelet/bubbletea)** `v1.3.10` - The Elm-inspired TUI framework that powers the entire application architecture
+- **[Bubbles](https://github.com/charmbracelet/bubbles)** `v0.21.0` - Reusable TUI components (progress bars, spinners, etc.)
+- **[Lip Gloss](https://github.com/charmbracelet/lipgloss)** `v1.1.0` - Style definitions and terminal styling for beautiful text rendering
+
+### Supporting Libraries
+
+- **[Harmonica](https://github.com/charmbracelet/harmonica)** `v0.2.0` - Spring-based animations for smooth transitions
+- **[Color Profile](https://github.com/charmbracelet/colorprofile)** `v0.2.3` - Automatic terminal color profile detection
+- **[Charm X - ANSI](https://github.com/charmbracelet/x/tree/main/ansi)** `v0.10.1` - ANSI escape code utilities
+- **[Charm X - Cell Buffer](https://github.com/charmbracelet/x/tree/main/cellbuf)** `v0.0.13` - Terminal cell buffer management
+- **[Charm X - Term](https://github.com/charmbracelet/x/tree/main/term)** `v0.2.1` - Terminal utilities and helpers
+
+### Other Dependencies
+
+- **[go-colorful](https://github.com/lucasb-eyer/go-colorful)** `v1.2.0` - Color manipulation and smooth gradient interpolation for the progress indicator
 
 ## 🎛️ Compression Settings
 
@@ -140,10 +153,11 @@ compress-tui/
 ### Building from Source
 
 ```bash
-# Install dependencies
-go mod download
+# Build the binary (dependencies are automatically downloaded)
+go build -o fideogo main.go
 
-# Build the binary
+# Or manually download dependencies first (optional)
+go mod download
 go build -o fideogo main.go
 
 # Run directly without installing
@@ -152,6 +166,8 @@ go run main.go
 # Build and install in one command
 go build -o fideogo main.go && mv fideogo ~/.local/bin/fideogo
 ```
+
+> **Note:** Go automatically downloads and caches dependencies during the build process. You don't need to run `go mod download` explicitly unless you want to pre-fetch dependencies.
 
 ## 🎯 Supported Video Formats
 
