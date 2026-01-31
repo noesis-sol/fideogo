@@ -66,18 +66,21 @@ type videoFile struct {
 }
 
 type model struct {
-	files              []videoFile
-	cursor             int
-	processing         bool
-	currentIdx         int
-	progressBar        progress.Model
-	done               bool
-	err                error
-	msgChan            chan tea.Msg
-	currentCmd         *exec.Cmd
+	files               []videoFile
+	cursor              int
+	processing          bool
+	currentIdx          int
+	progressBar         progress.Model
+	done                bool
+	err                 error
+	msgChans            map[int]chan tea.Msg
+	runningCmds         map[int]*exec.Cmd
 	showOverwritePrompt bool
 	overwriteCursor     int
 	pendingOutputFile   string
+	maxConcurrent       int
+	processingCount     int
+	totalToProcess      int
 }
 
 type progressMsg struct {
@@ -207,8 +210,11 @@ func initialModel(path string) model {
 	}
 
 	return model{
-		files:       files,
-		progressBar: p,
+		files:         files,
+		progressBar:   p,
+		msgChans:      make(map[int]chan tea.Msg),
+		runningCmds:   make(map[int]*exec.Cmd),
+		maxConcurrent: 3,
 	}
 }
 
@@ -282,9 +288,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "c":
 			if m.processing {
-				// Cancel the current process
-				if m.currentCmd != nil && m.currentCmd.Process != nil {
-					m.currentCmd.Process.Kill()
+				// Cancel all running processes
+				for _, cmd := range m.runningCmds {
+					if cmd != nil && cmd.Process != nil {
+						cmd.Process.Kill()
+					}
 				}
 				return m, nil
 			}
@@ -322,7 +330,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case processingStartMsg:
 		m.files[msg.idx].status = "processing"
-		m.currentCmd = msg.cmd
+		m.runningCmds[msg.idx] = msg.cmd
+		m.processingCount++
 		return m, m.continueListening()
 
 	case progressMsg:
@@ -340,64 +349,103 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case doneMsg:
 		m.files[msg.idx].status = "done"
 		m.files[msg.idx].progress = 1.0
-		m.msgChan = nil // Clear the channel
-		m.currentCmd = nil
-		// Find next selected file
-		for i := msg.idx + 1; i < len(m.files); i++ {
-			if m.files[i].selected {
-				m.currentIdx = i
+		delete(m.runningCmds, msg.idx)
+		m.processingCount--
+
+		// Find next unprocessed selected file
+		for i := 0; i < len(m.files); i++ {
+			if m.files[i].selected && m.files[i].status == "" {
+				// Found an unprocessed file, start it
 				return m, m.processFile(i)
 			}
 		}
-		m.processing = false
-		m.done = true
-		return m, nil
+
+		// No more files to process
+		if m.processingCount == 0 {
+			m.processing = false
+			m.done = true
+		}
+		return m, m.continueListening()
 
 	case errorMsg:
 		m.files[msg.idx].status = "error"
 		m.err = msg.err
-		m.msgChan = nil // Clear the channel
-		m.currentCmd = nil
-		m.processing = false
-		return m, nil
+		delete(m.runningCmds, msg.idx)
+		m.processingCount--
+
+		// Continue processing other files
+		if m.processingCount == 0 {
+			m.processing = false
+		}
+		return m, m.continueListening()
 
 	case cancelMsg:
-		m.msgChan = nil
-		m.currentCmd = nil
-		m.processing = false
-		return m, nil
+		m.processingCount--
+		if m.processingCount == 0 {
+			m.processing = false
+		}
+		return m, m.continueListening()
 	}
 
 	return m, nil
 }
 
 func (m *model) continueListening() tea.Cmd {
-	if m.msgChan != nil {
-		return listenToChannel(m.msgChan)
+	if len(m.msgChans) == 0 {
+		return nil
 	}
-	return nil
+
+	// Listen to all channels simultaneously
+	var cmds []tea.Cmd
+	for _, ch := range m.msgChans {
+		cmds = append(cmds, listenToChannel(ch))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *model) startProcessing() tea.Cmd {
-	for i, f := range m.files {
+	// Count total files to process
+	m.totalToProcess = 0
+	for _, f := range m.files {
 		if f.selected {
-			m.currentIdx = i
-			// Check if output file already exists
-			dir := filepath.Dir(f.path)
-			base := filepath.Base(f.path)
-			output := filepath.Join(dir, "out_"+base)
-
-			if _, err := os.Stat(output); err == nil {
-				// File exists, show prompt
-				m.showOverwritePrompt = true
-				m.overwriteCursor = 0
-				m.pendingOutputFile = output
-				return nil
-			}
-
-			m.processing = true
-			return m.processFile(i)
+			m.totalToProcess++
 		}
+	}
+
+	// Start up to maxConcurrent files
+	var cmds []tea.Cmd
+	started := 0
+
+	for i, f := range m.files {
+		if !f.selected || f.status != "" {
+			continue
+		}
+
+		if started >= m.maxConcurrent {
+			break
+		}
+
+		// Check if output file already exists
+		dir := filepath.Dir(f.path)
+		base := filepath.Base(f.path)
+		output := filepath.Join(dir, "out_"+base)
+
+		if _, err := os.Stat(output); err == nil {
+			// File exists, show prompt
+			m.showOverwritePrompt = true
+			m.overwriteCursor = 0
+			m.pendingOutputFile = output
+			m.currentIdx = i
+			return nil
+		}
+
+		m.processing = true
+		cmds = append(cmds, m.processFile(i))
+		started++
+	}
+
+	if len(cmds) > 0 {
+		return tea.Batch(cmds...)
 	}
 	return nil
 }
@@ -414,13 +462,13 @@ func listenToChannel(ch chan tea.Msg) tea.Cmd {
 
 func (m *model) processFile(idx int) tea.Cmd {
 	msgChan := make(chan tea.Msg, 100)
-	m.msgChan = msgChan
-
-	// Store the current file index for cleanup
-	currentIdx := idx
+	m.msgChans[idx] = msgChan
 
 	go func() {
-		defer close(msgChan)
+		defer func() {
+			close(msgChan)
+			delete(m.msgChans, idx)
+		}()
 
 		f := m.files[idx]
 
@@ -494,8 +542,6 @@ func (m *model) processFile(idx int) tea.Cmd {
 			if cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == -1 {
 				// Process was killed, send cancel message and clean up partial output
 				os.Remove(output)
-				m.files[currentIdx].status = ""
-				m.files[currentIdx].progress = 0
 				msgChan <- cancelMsg{}
 				return
 			}
@@ -519,7 +565,21 @@ func (m model) View() string {
 	var s strings.Builder
 
 	s.WriteString(titleStyle.Render("🎬 Video Compressor"))
-	s.WriteString("\n\n")
+	s.WriteString("\n")
+
+	// Show processing status if processing
+	if m.processing {
+		completed := 0
+		for _, f := range m.files {
+			if f.status == "done" {
+				completed++
+			}
+		}
+		statusLine := fmt.Sprintf("Processing %d of %d files (%d completed)",
+			m.processingCount, m.totalToProcess, completed)
+		s.WriteString(infoStyle.Render(statusLine))
+	}
+	s.WriteString("\n")
 
 	if len(m.files) == 0 {
 		s.WriteString(dimStyle.Render("No video files found in current directory."))
@@ -695,8 +755,11 @@ func main() {
 			}
 
 			m = model{
-				files:       allFiles,
-				progressBar: p,
+				files:         allFiles,
+				progressBar:   p,
+				msgChans:      make(map[int]chan tea.Msg),
+				runningCmds:   make(map[int]*exec.Cmd),
+				maxConcurrent: 3,
 			}
 		} else {
 			// No wildcard - process as before
@@ -739,7 +802,10 @@ func main() {
 							selected: true,
 						},
 					},
-					progressBar: p,
+					progressBar:   p,
+					msgChans:      make(map[int]chan tea.Msg),
+					runningCmds:   make(map[int]*exec.Cmd),
+					maxConcurrent: 3,
 				}
 			}
 		}
