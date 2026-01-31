@@ -345,6 +345,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, func() tea.Msg { return overwriteSkipMsg{} }
 				case 2: // Cancel all
 					m.showOverwritePrompt = false
+					// Kill all running processes
+					for _, cmd := range m.runningCmds {
+						if cmd != nil && cmd.Process != nil {
+							cmd.Process.Kill()
+						}
+					}
 					// Unselect all remaining unprocessed files
 					for i := 0; i < len(m.files); i++ {
 						if m.files[i].selected && m.files[i].status == "" {
@@ -352,7 +358,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.totalToProcess--
 						}
 					}
-					// If no more files processing, mark as done
+					// Mark as done if no files processing
 					if m.processingCount == 0 {
 						m.processing = false
 						if m.totalToProcess == 0 {
@@ -446,7 +452,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.files[msg.idx].status = "done"
 		m.files[msg.idx].progress = 1.0
 		delete(m.runningCmds, msg.idx)
-		m.processingCount--
+		delete(m.msgChans, msg.idx) // Clean up channel in main goroutine
+		if m.processingCount > 0 {
+			m.processingCount--
+		}
 
 		// Find next unprocessed selected file
 		for i := 0; i < len(m.files); i++ {
@@ -481,7 +490,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.files[msg.idx].status = "error"
 		m.err = msg.err
 		delete(m.runningCmds, msg.idx)
-		m.processingCount--
+		delete(m.msgChans, msg.idx) // Clean up channel in main goroutine
+		if m.processingCount > 0 {
+			m.processingCount--
+		}
 
 		// Find next unprocessed selected file to start
 		for i := 0; i < len(m.files); i++ {
@@ -516,7 +528,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.files[msg.idx].status = ""
 		m.files[msg.idx].progress = 0
 		delete(m.runningCmds, msg.idx)
-		m.processingCount--
+		delete(m.msgChans, msg.idx) // Clean up channel in main goroutine
+		if m.processingCount > 0 {
+			m.processingCount--
+		}
 
 		if m.processingCount == 0 {
 			m.processing = false
@@ -595,10 +610,7 @@ func (m *model) processFile(idx int) tea.Cmd {
 	m.msgChans[idx] = msgChan
 
 	go func() {
-		defer func() {
-			close(msgChan)
-			delete(m.msgChans, idx)
-		}()
+		defer close(msgChan)
 
 		f := m.files[idx]
 
