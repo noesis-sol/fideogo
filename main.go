@@ -16,7 +16,32 @@ import (
 	"github.com/lucasb-eyer/go-colorful"
 )
 
+// compressionConfig holds configuration for video compression
+type compressionConfig struct {
+	maxConcurrent int
+	channelBuffer int
+	codec         string
+	preset        string
+	crf           string
+	audioBitrate  string
+	resolution    string
+}
+
+const (
+	outputPrefix = "out_"
+)
+
 var (
+	defaultConfig = compressionConfig{
+		maxConcurrent: 3,
+		channelBuffer: 100,
+		codec:         "libx264",
+		preset:        "slow",
+		crf:           "28",
+		audioBitrate:  "96k",
+		resolution:    "1080",
+	}
+
 	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
 	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("212"))
 	normalStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
@@ -63,6 +88,30 @@ type videoFile struct {
 	progress float64
 	info     string
 	outInfo  string
+	err      error // Error for this specific file
+}
+
+// videoService encapsulates video processing operations
+type videoService struct {
+	config compressionConfig
+}
+
+func newVideoService(config compressionConfig) *videoService {
+	return &videoService{config: config}
+}
+
+// getOutputPath returns the output path for a given input file
+func getOutputPath(inputPath string) string {
+	dir := filepath.Dir(inputPath)
+	base := filepath.Base(inputPath)
+	return filepath.Join(dir, outputPrefix+base)
+}
+
+// outputFileExists checks if the output file already exists
+func outputFileExists(inputPath string) bool {
+	output := getOutputPath(inputPath)
+	_, err := os.Stat(output)
+	return err == nil
 }
 
 type model struct {
@@ -78,9 +127,11 @@ type model struct {
 	showOverwritePrompt bool
 	overwriteCursor     int
 	pendingOutputFile   string
-	maxConcurrent       int
+	config              compressionConfig
+	videoService        *videoService
 	processingCount     int
 	totalToProcess      int
+	userCancelled       bool
 }
 
 type progressMsg struct {
@@ -112,6 +163,15 @@ type overwriteSkipMsg struct{}
 func findVideos(dir string) []videoFile {
 	var files []videoFile
 
+	if dir == "" {
+		return files
+	}
+
+	// Validate directory exists and is accessible
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return files
+	}
+
 	// Read only the current directory (non-recursive)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -126,8 +186,8 @@ func findVideos(dir string) []videoFile {
 
 		name := entry.Name()
 
-		// Skip out_ prefixed files
-		if strings.HasPrefix(name, "out_") {
+		// Skip output files (those with the output prefix)
+		if strings.HasPrefix(name, outputPrefix) {
 			continue
 		}
 
@@ -142,22 +202,45 @@ func findVideos(dir string) []videoFile {
 	return files
 }
 
-func getVideoInfo(path string) string {
-	codec := runProbe(path, "stream=codec_name", "-select_streams", "v:0")
-	res := runProbe(path, "stream=width,height", "-select_streams", "v:0")
+func (vs *videoService) getVideoInfo(path string) string {
+	codec, _ := vs.runProbe(path, "stream=codec_name", "-select_streams", "v:0")
+	res, resErr := vs.runProbe(path, "stream=width,height", "-select_streams", "v:0")
+	if resErr != nil {
+		return "unable to read video info"
+	}
 	res = strings.Replace(res, "\n", "x", 1)
-	bitrate := runProbe(path, "format=bit_rate")
+	bitrate, _ := vs.runProbe(path, "format=bit_rate")
 	if br, err := strconv.ParseFloat(strings.TrimSpace(bitrate), 64); err == nil {
 		bitrate = fmt.Sprintf("%.1f Mbps", br/1000000)
 	}
 	return fmt.Sprintf("%s | %s | %s", strings.TrimSpace(res), strings.TrimSpace(codec), bitrate)
 }
 
-func runProbe(path, entries string, extra ...string) string {
+func (vs *videoService) runProbe(path, entries string, extra ...string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("path cannot be empty")
+	}
+	if entries == "" {
+		return "", fmt.Errorf("entries cannot be empty")
+	}
 	args := append([]string{"-v", "error", "-show_entries", entries, "-of", "default=noprint_wrappers=1:nokey=1"}, extra...)
 	args = append(args, path)
-	out, _ := exec.Command("ffprobe", args...).Output()
-	return string(out)
+	out, err := exec.Command("ffprobe", args...).Output()
+	if err != nil {
+		return "", fmt.Errorf("ffprobe failed: %w", err)
+	}
+	return string(out), nil
+}
+
+func (vs *videoService) buildFFmpegCommand(inputPath, outputPath string) *exec.Cmd {
+	return exec.Command("ffmpeg", "-i", inputPath,
+		"-c:v", vs.config.codec, "-preset", vs.config.preset, "-crf", vs.config.crf,
+		"-vf", "scale=-2:"+vs.config.resolution,
+		"-c:a", "aac", "-b:a", vs.config.audioBitrate,
+		"-movflags", "+faststart",
+		"-progress", "pipe:1",
+		"-loglevel", "error",
+		"-y", outputPath)
 }
 
 func getProgressColor(progress float64) lipgloss.Color {
@@ -198,23 +281,29 @@ func getProgressColor(progress float64) lipgloss.Color {
 }
 
 func initialModel(path string) model {
+	files := findVideos(path)
+	return newModel(files)
+}
+
+func newModel(files []videoFile) model {
 	p := progress.New(
 		progress.WithDefaultGradient(),
 		progress.WithoutPercentage(),
 	)
-	files := findVideos(path)
 
 	// Auto-select if there's only one file
 	if len(files) == 1 {
 		files[0].selected = true
 	}
 
+	config := defaultConfig
 	return model{
-		files:         files,
-		progressBar:   p,
-		msgChans:      make(map[int]chan tea.Msg),
-		runningCmds:   make(map[int]*exec.Cmd),
-		maxConcurrent: 3,
+		files:        files,
+		progressBar:  p,
+		msgChans:     make(map[int]chan tea.Msg),
+		runningCmds:  make(map[int]*exec.Cmd),
+		config:       config,
+		videoService: newVideoService(config),
 	}
 }
 
@@ -228,326 +317,374 @@ func (m model) Init() tea.Cmd {
 	return nil
 }
 
+func (m model) handleOverwriteConfirm() (model, tea.Cmd) {
+	m.showOverwritePrompt = false
+	m.processing = true
+	// User is confirming to continue, reset cancellation
+	m.userCancelled = false
+
+	var cmds []tea.Cmd
+
+	// Only start the confirmed file if we have capacity
+	if m.processingCount < m.config.maxConcurrent {
+		// Verify file is still in valid state before processing
+		if m.files[m.currentIdx].selected && m.files[m.currentIdx].status == "" {
+			cmds = append(cmds, m.processFile(m.currentIdx))
+		}
+	}
+
+	// Try to start more files up to maxConcurrent
+	for i := 0; i < len(m.files); i++ {
+		if m.processingCount+len(cmds) >= m.config.maxConcurrent {
+			break
+		}
+
+		if m.files[i].selected && m.files[i].status == "" && i != m.currentIdx {
+			if outputFileExists(m.files[i].path) {
+				// Has overwrite conflict, skip for now
+				continue
+			}
+
+			// No conflict, start processing
+			cmds = append(cmds, m.processFile(i))
+		}
+	}
+
+	// If we still have capacity and there are unprocessed files, check for next conflict
+	if m.processingCount+len(cmds) < m.config.maxConcurrent {
+		for i := 0; i < len(m.files); i++ {
+			if m.files[i].selected && m.files[i].status == "" && i != m.currentIdx {
+				if outputFileExists(m.files[i].path) {
+					// Found next conflict, show prompt
+					m.showOverwritePrompt = true
+					m.overwriteCursor = 0
+					m.pendingOutputFile = getOutputPath(m.files[i].path)
+					m.currentIdx = i
+					break
+				}
+			}
+		}
+	}
+
+	if len(cmds) > 0 {
+		return m, tea.Batch(cmds...)
+	}
+	return m, nil
+}
+
+func (m model) handleProcessingStart(msg processingStartMsg) (model, tea.Cmd) {
+	// If user cancelled, don't register this file as processing
+	if m.userCancelled {
+		// Clean up and reset file to allow retry
+		m.files[msg.idx].status = ""
+		m.files[msg.idx].progress = 0
+		delete(m.msgChans, msg.idx)
+		return m, nil
+	}
+
+	m.files[msg.idx].status = "processing"
+	m.runningCmds[msg.idx] = msg.cmd
+	m.processingCount++
+	// Return listener only for this message's channel
+	if ch, ok := m.msgChans[msg.idx]; ok {
+		return m, listenToChannel(ch)
+	}
+	return m, nil
+}
+
+func (m model) handleProgress(msg progressMsg) (model, tea.Cmd) {
+	m.files[msg.idx].progress = msg.progress
+	// Return listener only for this message's channel
+	if ch, ok := m.msgChans[msg.idx]; ok {
+		return m, listenToChannel(ch)
+	}
+	return m, nil
+}
+
+func (m model) handleVideoInfo(msg videoInfoMsg) (model, tea.Cmd) {
+	m.files[msg.idx].info = msg.info
+	// Return listener only for this message's channel
+	if ch, ok := m.msgChans[msg.idx]; ok {
+		return m, listenToChannel(ch)
+	}
+	return m, nil
+}
+
+func (m model) handleOutputInfo(msg outputInfoMsg) (model, tea.Cmd) {
+	m.files[msg.idx].outInfo = msg.info
+	// Return listener only for this message's channel
+	if ch, ok := m.msgChans[msg.idx]; ok {
+		return m, listenToChannel(ch)
+	}
+	return m, nil
+}
+
+func (m model) tryStartNextFile() (model, tea.Cmd) {
+	// Find next unprocessed selected file only if we have capacity and no prompt is showing
+	if m.processingCount < m.config.maxConcurrent && !m.showOverwritePrompt {
+		for i := 0; i < len(m.files); i++ {
+			if m.files[i].selected && m.files[i].status == "" {
+				// Check if file has overwrite conflict
+				if outputFileExists(m.files[i].path) {
+					// Has overwrite conflict, show prompt
+					m.showOverwritePrompt = true
+					m.overwriteCursor = 0
+					m.pendingOutputFile = getOutputPath(m.files[i].path)
+					m.currentIdx = i
+					return m, nil
+				}
+
+				// No conflict, start processing
+				return m, m.processFile(i)
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m model) handleDone(msg doneMsg) (model, tea.Cmd) {
+	m.files[msg.idx].status = "done"
+	m.files[msg.idx].progress = 1.0
+	delete(m.runningCmds, msg.idx)
+	delete(m.msgChans, msg.idx)
+	if m.processingCount > 0 {
+		m.processingCount--
+	}
+
+	// Try to start next file
+	m, cmd := m.tryStartNextFile()
+	if cmd != nil {
+		return m, cmd
+	}
+
+	// No more files to process
+	if m.processingCount == 0 {
+		m.processing = false
+		m.done = true
+	}
+	return m, nil
+}
+
+func (m model) handleError(msg errorMsg) (model, tea.Cmd) {
+	// Only decrement processingCount if file was actually processing
+	wasProcessing := m.files[msg.idx].status == "processing"
+
+	m.files[msg.idx].status = "error"
+	m.files[msg.idx].err = msg.err
+	m.err = msg.err
+	delete(m.runningCmds, msg.idx)
+	delete(m.msgChans, msg.idx)
+
+	if wasProcessing && m.processingCount > 0 {
+		m.processingCount--
+	}
+
+	// Try to start next file
+	m, cmd := m.tryStartNextFile()
+	if cmd != nil {
+		return m, cmd
+	}
+
+	// No more files to process
+	if m.processingCount == 0 {
+		m.processing = false
+	}
+	return m, nil
+}
+
+func (m model) handleCancel(msg cancelMsg) (model, tea.Cmd) {
+	// Reset file status so it can be retried
+	m.files[msg.idx].status = ""
+	m.files[msg.idx].progress = 0
+	m.files[msg.idx].err = nil
+	delete(m.runningCmds, msg.idx)
+	delete(m.msgChans, msg.idx)
+	if m.processingCount > 0 {
+		m.processingCount--
+	}
+
+	if m.processingCount == 0 {
+		m.processing = false
+	}
+	return m, nil
+}
+
+func (m model) handleKeyPress(msg tea.KeyMsg) (model, tea.Cmd) {
+	// Handle overwrite prompt first
+	if m.showOverwritePrompt {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "up", "k":
+			if m.overwriteCursor > 0 {
+				m.overwriteCursor--
+			}
+		case "down", "j":
+			if m.overwriteCursor < 2 {
+				m.overwriteCursor++
+			}
+		case "enter":
+			switch m.overwriteCursor {
+			case 0: // Overwrite
+				return m, func() tea.Msg { return overwriteConfirmMsg{} }
+			case 1: // Skip
+				return m, func() tea.Msg { return overwriteSkipMsg{} }
+			case 2: // Cancel all
+				m.showOverwritePrompt = false
+				// Mark as cancelled to prevent new files from starting
+				m.userCancelled = true
+				// Kill all running processes
+				for _, cmd := range m.runningCmds {
+					if cmd != nil && cmd.Process != nil {
+						cmd.Process.Kill()
+					}
+				}
+				// Unselect all remaining unprocessed files
+				for i := 0; i < len(m.files); i++ {
+					if m.files[i].selected && m.files[i].status == "" {
+						m.files[i].selected = false
+						if m.totalToProcess > 0 {
+							m.totalToProcess--
+						}
+					}
+				}
+				// Mark as done if no files processing
+				if m.processingCount == 0 {
+					m.processing = false
+					if m.totalToProcess == 0 {
+						m.done = true
+					}
+				}
+				return m, nil
+			}
+		}
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "ctrl+c", "c":
+		if m.processing {
+			// Mark as cancelled to prevent new files from starting
+			m.userCancelled = true
+			// Cancel all running processes
+			for _, cmd := range m.runningCmds {
+				if cmd != nil && cmd.Process != nil {
+					cmd.Process.Kill()
+				}
+			}
+			return m, nil
+		}
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+	case "q":
+		if !m.processing {
+			return m, tea.Quit
+		}
+	}
+	if m.processing {
+		return m, nil
+	}
+	// Don't handle navigation/selection if no files
+	if len(m.files) == 0 {
+		return m, nil
+	}
+	switch msg.String() {
+	case "up", "k":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+	case "down", "j":
+		if m.cursor < len(m.files)-1 {
+			m.cursor++
+		}
+	case " ":
+		m.files[m.cursor].selected = !m.files[m.cursor].selected
+	case "a":
+		// Select all unprocessed files and start processing
+		for i := range m.files {
+			// Only select files that haven't been processed yet
+			if m.files[i].status == "" {
+				m.files[i].selected = true
+			}
+		}
+		return m, m.startProcessing()
+	case "enter":
+		return m, m.startProcessing()
+	}
+	return m, nil
+}
+
+func (m model) handleOverwriteSkip() (model, tea.Cmd) {
+	m.showOverwritePrompt = false
+	// Unselect the skipped file
+	m.files[m.currentIdx].selected = false
+	if m.totalToProcess > 0 {
+		m.totalToProcess--
+	}
+
+	// Check if we should start processing or look for next overwrite
+	if m.processingCount < m.config.maxConcurrent {
+		// Try to start more files
+		for i := 0; i < len(m.files); i++ {
+			if m.files[i].selected && m.files[i].status == "" {
+				if outputFileExists(m.files[i].path) {
+					// Another overwrite conflict, show prompt
+					m.showOverwritePrompt = true
+					m.overwriteCursor = 0
+					m.pendingOutputFile = getOutputPath(m.files[i].path)
+					m.currentIdx = i
+					return m, nil
+				}
+
+				// No conflict, start processing
+				m.processing = true
+				return m, m.processFile(i)
+			}
+		}
+	}
+
+	// Check if all done
+	if m.processingCount == 0 && m.totalToProcess == 0 {
+		m.done = true
+	}
+	return m, nil
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case autoStartMsg:
 		return m, m.startProcessing()
 
 	case overwriteConfirmMsg:
-		m.showOverwritePrompt = false
-		m.processing = true
-
-		var cmds []tea.Cmd
-
-		// Only start the confirmed file if we have capacity
-		if m.processingCount < m.maxConcurrent {
-			// Verify file is still in valid state before processing
-			if m.files[m.currentIdx].selected && m.files[m.currentIdx].status == "" {
-				cmds = append(cmds, m.processFile(m.currentIdx))
-			}
-		}
-
-		// Try to start more files up to maxConcurrent
-		for i := 0; i < len(m.files); i++ {
-			if m.processingCount+len(cmds) >= m.maxConcurrent {
-				break
-			}
-
-			if m.files[i].selected && m.files[i].status == "" && i != m.currentIdx {
-				dir := filepath.Dir(m.files[i].path)
-				base := filepath.Base(m.files[i].path)
-				output := filepath.Join(dir, "out_"+base)
-
-				if _, err := os.Stat(output); err == nil {
-					// Has overwrite conflict, skip for now
-					continue
-				}
-
-				// No conflict, start processing
-				cmds = append(cmds, m.processFile(i))
-			}
-		}
-
-		// If we still have capacity and there are unprocessed files, check for next conflict
-		if m.processingCount+len(cmds) < m.maxConcurrent {
-			for i := 0; i < len(m.files); i++ {
-				if m.files[i].selected && m.files[i].status == "" && i != m.currentIdx {
-					dir := filepath.Dir(m.files[i].path)
-					base := filepath.Base(m.files[i].path)
-					output := filepath.Join(dir, "out_"+base)
-
-					if _, err := os.Stat(output); err == nil {
-						// Found next conflict, show prompt
-						m.showOverwritePrompt = true
-						m.overwriteCursor = 0
-						m.pendingOutputFile = output
-						m.currentIdx = i
-						break
-					}
-				}
-			}
-		}
-
-		if len(cmds) > 0 {
-			return m, tea.Batch(cmds...)
-		}
-		return m, nil
+		return m.handleOverwriteConfirm()
 
 	case overwriteSkipMsg:
-		m.showOverwritePrompt = false
-		// Unselect the skipped file
-		m.files[m.currentIdx].selected = false
-		m.totalToProcess--
-
-		// Check if we should start processing or look for next overwrite
-		if m.processingCount < m.maxConcurrent {
-			// Try to start more files
-			for i := 0; i < len(m.files); i++ {
-				if m.files[i].selected && m.files[i].status == "" {
-					dir := filepath.Dir(m.files[i].path)
-					base := filepath.Base(m.files[i].path)
-					output := filepath.Join(dir, "out_"+base)
-
-					if _, err := os.Stat(output); err == nil {
-						// Another overwrite conflict, show prompt
-						m.showOverwritePrompt = true
-						m.overwriteCursor = 0
-						m.pendingOutputFile = output
-						m.currentIdx = i
-						return m, nil
-					}
-
-					// No conflict, start processing
-					m.processing = true
-					return m, m.processFile(i)
-				}
-			}
-		}
-
-		// Check if all done
-		if m.processingCount == 0 && m.totalToProcess == 0 {
-			m.done = true
-		}
-		return m, nil
+		return m.handleOverwriteSkip()
 
 	case tea.KeyMsg:
-		// Handle overwrite prompt first
-		if m.showOverwritePrompt {
-			switch msg.String() {
-			case "ctrl+c":
-				return m, tea.Quit
-			case "up", "k":
-				if m.overwriteCursor > 0 {
-					m.overwriteCursor--
-				}
-			case "down", "j":
-				if m.overwriteCursor < 2 {
-					m.overwriteCursor++
-				}
-			case "enter":
-				switch m.overwriteCursor {
-				case 0: // Overwrite
-					return m, func() tea.Msg { return overwriteConfirmMsg{} }
-				case 1: // Skip
-					return m, func() tea.Msg { return overwriteSkipMsg{} }
-				case 2: // Cancel all
-					m.showOverwritePrompt = false
-					// Kill all running processes
-					for _, cmd := range m.runningCmds {
-						if cmd != nil && cmd.Process != nil {
-							cmd.Process.Kill()
-						}
-					}
-					// Unselect all remaining unprocessed files
-					for i := 0; i < len(m.files); i++ {
-						if m.files[i].selected && m.files[i].status == "" {
-							m.files[i].selected = false
-							m.totalToProcess--
-						}
-					}
-					// Mark as done if no files processing
-					if m.processingCount == 0 {
-						m.processing = false
-						if m.totalToProcess == 0 {
-							m.done = true
-						}
-					}
-					return m, nil
-				}
-			}
-			return m, nil
-		}
-
-		switch msg.String() {
-		case "ctrl+c", "c":
-			if m.processing {
-				// Cancel all running processes
-				for _, cmd := range m.runningCmds {
-					if cmd != nil && cmd.Process != nil {
-						cmd.Process.Kill()
-					}
-				}
-				return m, nil
-			}
-			if msg.String() == "ctrl+c" {
-				return m, tea.Quit
-			}
-		case "q":
-			if !m.processing {
-				return m, tea.Quit
-			}
-		}
-		if m.processing {
-			return m, nil
-		}
-		switch msg.String() {
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		case "down", "j":
-			if m.cursor < len(m.files)-1 {
-				m.cursor++
-			}
-		case " ":
-			m.files[m.cursor].selected = !m.files[m.cursor].selected
-		case "a":
-			// Select all files and start processing
-			for i := range m.files {
-				m.files[i].selected = true
-			}
-			return m, m.startProcessing()
-		case "enter":
-			return m, m.startProcessing()
-		}
+		return m.handleKeyPress(msg)
 
 	case processingStartMsg:
-		m.files[msg.idx].status = "processing"
-		m.runningCmds[msg.idx] = msg.cmd
-		m.processingCount++
-		// Return listener only for this message's channel
-		if ch, ok := m.msgChans[msg.idx]; ok {
-			return m, listenToChannel(ch)
-		}
-		return m, nil
+		return m.handleProcessingStart(msg)
 
 	case progressMsg:
-		m.files[msg.idx].progress = msg.progress
-		// Return listener only for this message's channel
-		if ch, ok := m.msgChans[msg.idx]; ok {
-			return m, listenToChannel(ch)
-		}
-		return m, nil
+		return m.handleProgress(msg)
 
 	case videoInfoMsg:
-		m.files[msg.idx].info = msg.info
-		// Return listener only for this message's channel
-		if ch, ok := m.msgChans[msg.idx]; ok {
-			return m, listenToChannel(ch)
-		}
-		return m, nil
+		return m.handleVideoInfo(msg)
 
 	case outputInfoMsg:
-		m.files[msg.idx].outInfo = msg.info
-		// Return listener only for this message's channel
-		if ch, ok := m.msgChans[msg.idx]; ok {
-			return m, listenToChannel(ch)
-		}
-		return m, nil
+		return m.handleOutputInfo(msg)
 
 	case doneMsg:
-		m.files[msg.idx].status = "done"
-		m.files[msg.idx].progress = 1.0
-		delete(m.runningCmds, msg.idx)
-		delete(m.msgChans, msg.idx) // Clean up channel in main goroutine
-		if m.processingCount > 0 {
-			m.processingCount--
-		}
-
-		// Find next unprocessed selected file only if we have capacity and no prompt is showing
-		if m.processingCount < m.maxConcurrent && !m.showOverwritePrompt {
-			for i := 0; i < len(m.files); i++ {
-				if m.files[i].selected && m.files[i].status == "" {
-					// Check if file has overwrite conflict
-					dir := filepath.Dir(m.files[i].path)
-					base := filepath.Base(m.files[i].path)
-					output := filepath.Join(dir, "out_"+base)
-
-					if _, err := os.Stat(output); err == nil {
-						// Has overwrite conflict, show prompt
-						m.showOverwritePrompt = true
-						m.overwriteCursor = 0
-						m.pendingOutputFile = output
-						m.currentIdx = i
-						return m, nil
-					}
-
-					// No conflict, start processing
-					return m, m.processFile(i)
-				}
-			}
-		}
-
-		// No more files to process
-		if m.processingCount == 0 {
-			m.processing = false
-			m.done = true
-		}
-		return m, nil
+		return m.handleDone(msg)
 
 	case errorMsg:
-		m.files[msg.idx].status = "error"
-		m.err = msg.err
-		delete(m.runningCmds, msg.idx)
-		delete(m.msgChans, msg.idx) // Clean up channel in main goroutine
-		if m.processingCount > 0 {
-			m.processingCount--
-		}
-
-		// Find next unprocessed selected file to start only if we have capacity and no prompt is showing
-		if m.processingCount < m.maxConcurrent && !m.showOverwritePrompt {
-			for i := 0; i < len(m.files); i++ {
-				if m.files[i].selected && m.files[i].status == "" {
-					// Check if file has overwrite conflict
-					dir := filepath.Dir(m.files[i].path)
-					base := filepath.Base(m.files[i].path)
-					output := filepath.Join(dir, "out_"+base)
-
-					if _, err := os.Stat(output); err == nil {
-						// Has overwrite conflict, show prompt
-						m.showOverwritePrompt = true
-						m.overwriteCursor = 0
-						m.pendingOutputFile = output
-						m.currentIdx = i
-						return m, nil
-					}
-
-					// No conflict, start processing
-					return m, m.processFile(i)
-				}
-			}
-		}
-
-		// No more files to process
-		if m.processingCount == 0 {
-			m.processing = false
-		}
-		return m, nil
+		return m.handleError(msg)
 
 	case cancelMsg:
-		// Reset file status so it can be retried
-		m.files[msg.idx].status = ""
-		m.files[msg.idx].progress = 0
-		delete(m.runningCmds, msg.idx)
-		delete(m.msgChans, msg.idx) // Clean up channel in main goroutine
-		if m.processingCount > 0 {
-			m.processingCount--
-		}
-
-		if m.processingCount == 0 {
-			m.processing = false
-		}
-		return m, nil
+		return m.handleCancel(msg)
 	}
 
 	return m, nil
@@ -555,10 +692,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 
 func (m *model) startProcessing() tea.Cmd {
-	// Count total files to process
+	// Reset cancellation flag for new processing session
+	m.userCancelled = false
+
+	// Count total files to process (only unprocessed files)
 	m.totalToProcess = 0
 	for _, f := range m.files {
-		if f.selected {
+		if f.selected && f.status == "" {
 			m.totalToProcess++
 		}
 	}
@@ -573,21 +713,17 @@ func (m *model) startProcessing() tea.Cmd {
 			continue
 		}
 
-		if started >= m.maxConcurrent {
+		if started >= m.config.maxConcurrent {
 			break
 		}
 
 		// Check if output file already exists
-		dir := filepath.Dir(f.path)
-		base := filepath.Base(f.path)
-		output := filepath.Join(dir, "out_"+base)
-
-		if _, err := os.Stat(output); err == nil {
+		if outputFileExists(f.path) {
 			// File exists, show prompt for first conflict only
 			if !foundOverwrite {
 				m.showOverwritePrompt = true
 				m.overwriteCursor = 0
-				m.pendingOutputFile = output
+				m.pendingOutputFile = getOutputPath(f.path)
 				m.currentIdx = i
 				foundOverwrite = true
 			}
@@ -617,7 +753,14 @@ func listenToChannel(ch chan tea.Msg) tea.Cmd {
 }
 
 func (m *model) processFile(idx int) tea.Cmd {
-	msgChan := make(chan tea.Msg, 100)
+	// Validate index bounds
+	if idx < 0 || idx >= len(m.files) {
+		return func() tea.Msg {
+			return errorMsg{idx: idx, err: fmt.Errorf("invalid file index: %d", idx)}
+		}
+	}
+
+	msgChan := make(chan tea.Msg, m.config.channelBuffer)
 	m.msgChans[idx] = msgChan
 
 	go func() {
@@ -626,31 +769,26 @@ func (m *model) processFile(idx int) tea.Cmd {
 		f := m.files[idx]
 
 		// Get input info
-		info := getVideoInfo(f.path)
+		info := m.videoService.getVideoInfo(f.path)
 		if info != "" {
 			msgChan <- videoInfoMsg{idx: idx, info: info}
 		}
 
-		dir := filepath.Dir(f.path)
-		base := filepath.Base(f.path)
-		output := filepath.Join(dir, "out_"+base)
+		output := getOutputPath(f.path)
 
 		// Get duration for progress calculation
-		durStr := runProbe(f.path, "format=duration")
+		durStr, err := m.videoService.runProbe(f.path, "format=duration")
+		if err != nil {
+			msgChan <- errorMsg{idx: idx, err: fmt.Errorf("failed to probe video: %w", err)}
+			return
+		}
 		duration, err := strconv.ParseFloat(strings.TrimSpace(durStr), 64)
 		if err != nil {
 			msgChan <- errorMsg{idx: idx, err: fmt.Errorf("failed to get video duration: %w", err)}
 			return
 		}
 
-		cmd := exec.Command("ffmpeg", "-i", f.path,
-			"-c:v", "libx264", "-preset", "slow", "-crf", "28",
-			"-vf", "scale=-2:1080",
-			"-c:a", "aac", "-b:a", "96k",
-			"-movflags", "+faststart",
-			"-progress", "pipe:1",
-			"-loglevel", "error",
-			"-y", output)
+		cmd := m.videoService.buildFFmpegCommand(f.path, output)
 
 		// Send processing start message with the command
 		msgChan <- processingStartMsg{idx: idx, cmd: cmd}
@@ -661,15 +799,24 @@ func (m *model) processFile(idx int) tea.Cmd {
 			return
 		}
 
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			msgChan <- errorMsg{idx: idx, err: fmt.Errorf("failed to create stderr pipe: %w", err)}
+			return
+		}
+
 		if err := cmd.Start(); err != nil {
 			msgChan <- errorMsg{idx: idx, err: fmt.Errorf("failed to start ffmpeg: %w", err)}
 			return
 		}
 
 		scanner := bufio.NewScanner(stdout)
+		var stderrBuf strings.Builder
 
 		// Parse progress in a separate goroutine
+		progressDone := make(chan struct{})
 		go func() {
+			defer close(progressDone)
 			for scanner.Scan() {
 				line := scanner.Text()
 				if matches := timeRegex.FindStringSubmatch(line); len(matches) > 1 {
@@ -690,20 +837,47 @@ func (m *model) processFile(idx int) tea.Cmd {
 			}
 		}()
 
-		if err := cmd.Wait(); err != nil {
+		// Capture stderr in case of errors
+		stderrDone := make(chan struct{})
+		go func() {
+			defer close(stderrDone)
+			stderrScanner := bufio.NewScanner(stderr)
+			for stderrScanner.Scan() {
+				stderrBuf.WriteString(stderrScanner.Text())
+				stderrBuf.WriteString("\n")
+			}
+		}()
+
+		waitErr := cmd.Wait()
+
+		// Wait for goroutines to finish reading pipes
+		<-progressDone
+		<-stderrDone
+
+		if waitErr != nil {
 			// Check if process was killed (cancelled)
 			if cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == -1 {
 				// Process was killed, send cancel message and clean up partial output
-				os.Remove(output)
+				if removeErr := os.Remove(output); removeErr != nil && !os.IsNotExist(removeErr) {
+					// Log but don't fail on cleanup error
+					msgChan <- errorMsg{idx: idx, err: fmt.Errorf("cleanup failed: %w", removeErr)}
+					return
+				}
 				msgChan <- cancelMsg{idx: idx}
 				return
 			}
-			msgChan <- errorMsg{idx: idx, err: fmt.Errorf("ffmpeg failed: %w", err)}
+
+			// Include stderr output in error message if available
+			errMsg := fmt.Sprintf("ffmpeg failed: %v", waitErr)
+			if stderrOutput := stderrBuf.String(); stderrOutput != "" {
+				errMsg = fmt.Sprintf("%s\nDetails: %s", errMsg, strings.TrimSpace(stderrOutput))
+			}
+			msgChan <- errorMsg{idx: idx, err: fmt.Errorf(errMsg)}
 			return
 		}
 
 		// Get output info
-		outInfo := getVideoInfo(output)
+		outInfo := m.videoService.getVideoInfo(output)
 		if outInfo != "" {
 			msgChan <- outputInfoMsg{idx: idx, info: outInfo}
 		}
@@ -781,9 +955,9 @@ func (m model) View() string {
 			}
 		} else if f.status == "error" {
 			s.WriteString(errorStyle.Render(" ✗"))
-			if m.err != nil {
+			if f.err != nil {
 				s.WriteString("\n    ")
-				s.WriteString(errorStyle.Render("Error: " + m.err.Error()))
+				s.WriteString(errorStyle.Render("Error: " + f.err.Error()))
 			}
 		}
 
@@ -841,129 +1015,116 @@ func (m model) View() string {
 	return s.String()
 }
 
-func main() {
-	var m model
+func collectVideosFromPattern(pattern string) ([]videoFile, error) {
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("error expanding pattern: %w", err)
+	}
 
-	// Check for positional argument
-	if len(os.Args) > 1 {
-		targetPath := os.Args[1]
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no files or directories match pattern: %s", pattern)
+	}
 
-		// Check if path contains wildcard
-		if strings.Contains(targetPath, "*") {
-			// Expand glob pattern
-			matches, err := filepath.Glob(targetPath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error expanding pattern: %v\n", err)
-				os.Exit(1)
-			}
+	var allFiles []videoFile
+	for _, match := range matches {
+		info, err := os.Stat(match)
+		if err != nil {
+			continue
+		}
 
-			if len(matches) == 0 {
-				fmt.Fprintf(os.Stderr, "Error: no files or directories match pattern: %s\n", targetPath)
-				os.Exit(1)
-			}
-
-			// Collect all video files from matches
-			var allFiles []videoFile
-			for _, match := range matches {
-				info, err := os.Stat(match)
+		if info.IsDir() {
+			dirFiles := findVideos(match)
+			allFiles = append(allFiles, dirFiles...)
+		} else {
+			ext := strings.ToLower(filepath.Ext(match))
+			if videoExtensions[ext] {
+				absPath, err := filepath.Abs(match)
 				if err != nil {
-					// Skip files that can't be accessed
 					continue
 				}
-
-				if info.IsDir() {
-					// It's a directory - find videos in it
-					dirFiles := findVideos(match)
-					allFiles = append(allFiles, dirFiles...)
-				} else {
-					// It's a file - check if it's a video
-					ext := strings.ToLower(filepath.Ext(match))
-					if videoExtensions[ext] {
-						absPath, err := filepath.Abs(match)
-						if err != nil {
-							continue
-						}
-						allFiles = append(allFiles, videoFile{
-							path: absPath,
-							name: filepath.Base(match),
-						})
-					}
-				}
-			}
-
-			if len(allFiles) == 0 {
-				fmt.Fprintf(os.Stderr, "Error: no video files found matching pattern: %s\n", targetPath)
-				os.Exit(1)
-			}
-
-			// Create model with collected files
-			p := progress.New(
-				progress.WithDefaultGradient(),
-				progress.WithoutPercentage(),
-			)
-
-			// Auto-select if there's only one file
-			if len(allFiles) == 1 {
-				allFiles[0].selected = true
-			}
-
-			m = model{
-				files:         allFiles,
-				progressBar:   p,
-				msgChans:      make(map[int]chan tea.Msg),
-				runningCmds:   make(map[int]*exec.Cmd),
-				maxConcurrent: 3,
-			}
-		} else {
-			// No wildcard - process as before
-			// Get file info to determine if it's a file or directory
-			info, err := os.Stat(targetPath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-
-			if info.IsDir() {
-				// It's a directory - initialize model with this directory
-				m = initialModel(targetPath)
-			} else {
-				// It's a file - check if it's a video file
-				ext := strings.ToLower(filepath.Ext(targetPath))
-				if !videoExtensions[ext] {
-					fmt.Fprintf(os.Stderr, "Error: %s is not a supported video file\n", targetPath)
-					fmt.Fprintf(os.Stderr, "Supported extensions: .mp4, .mov, .avi, .mkv, .m4v\n")
-					os.Exit(1)
-				}
-
-				// Create model with single file, auto-selected
-				p := progress.New(
-					progress.WithDefaultGradient(),
-					progress.WithoutPercentage(),
-				)
-
-				absPath, err := filepath.Abs(targetPath)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
-					os.Exit(1)
-				}
-
-				m = model{
-					files: []videoFile{
-						{
-							path:     absPath,
-							name:     filepath.Base(targetPath),
-							selected: true,
-						},
-					},
-					progressBar:   p,
-					msgChans:      make(map[int]chan tea.Msg),
-					runningCmds:   make(map[int]*exec.Cmd),
-					maxConcurrent: 3,
-				}
+				allFiles = append(allFiles, videoFile{
+					path: absPath,
+					name: filepath.Base(match),
+				})
 			}
 		}
+	}
+
+	if len(allFiles) == 0 {
+		return nil, fmt.Errorf("no video files found matching pattern: %s", pattern)
+	}
+
+	return allFiles, nil
+}
+
+func createModelFromPath(targetPath string) (model, error) {
+	// Check for wildcard pattern
+	if strings.Contains(targetPath, "*") {
+		files, err := collectVideosFromPattern(targetPath)
+		if err != nil {
+			return model{}, err
+		}
+		return newModel(files), nil
+	}
+
+	// Get file info to determine if it's a file or directory
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		return model{}, err
+	}
+
+	if info.IsDir() {
+		return initialModel(targetPath), nil
+	}
+
+	// It's a file - validate it's a video
+	ext := strings.ToLower(filepath.Ext(targetPath))
+	if !videoExtensions[ext] {
+		return model{}, fmt.Errorf("%s is not a supported video file\nSupported extensions: .mp4, .mov, .avi, .mkv, .m4v", targetPath)
+	}
+
+	// Create model with single file
+	absPath, err := filepath.Abs(targetPath)
+	if err != nil {
+		return model{}, fmt.Errorf("error resolving path: %w", err)
+	}
+
+	return newModel([]videoFile{
+		{
+			path:     absPath,
+			name:     filepath.Base(targetPath),
+			selected: true,
+		},
+	}), nil
+}
+
+func checkDependencies() error {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return fmt.Errorf("ffmpeg not found in PATH. Please install ffmpeg to use this tool")
+	}
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		return fmt.Errorf("ffprobe not found in PATH. Please install ffmpeg to use this tool")
+	}
+	return nil
+}
+
+func main() {
+	// Check dependencies before starting
+	if err := checkDependencies(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	var m model
+	var err error
+
+	if len(os.Args) > 1 {
+		m, err = createModelFromPath(os.Args[1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	} else {
-		// No arguments - use current directory
 		m = initialModel(".")
 	}
 
