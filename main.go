@@ -105,7 +105,7 @@ type outputInfoMsg struct {
 	info string
 }
 type autoStartMsg struct{}
-type cancelMsg struct{}
+type cancelMsg struct{ idx int }
 type overwriteConfirmMsg struct{}
 type overwriteSkipMsg struct{}
 
@@ -235,21 +235,92 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case overwriteConfirmMsg:
 		m.showOverwritePrompt = false
-		// Continue with processing
 		m.processing = true
-		return m, m.processFile(m.currentIdx)
+
+		// Start processing the confirmed file
+		var cmds []tea.Cmd
+		cmds = append(cmds, m.processFile(m.currentIdx))
+
+		// Try to start more files up to maxConcurrent
+		started := 1
+		for i := 0; i < len(m.files); i++ {
+			if started >= m.maxConcurrent {
+				break
+			}
+
+			if m.files[i].selected && m.files[i].status == "" && i != m.currentIdx {
+				dir := filepath.Dir(m.files[i].path)
+				base := filepath.Base(m.files[i].path)
+				output := filepath.Join(dir, "out_"+base)
+
+				if _, err := os.Stat(output); err == nil {
+					// Has overwrite conflict, skip for now
+					continue
+				}
+
+				// No conflict, start processing
+				cmds = append(cmds, m.processFile(i))
+				started++
+			}
+		}
+
+		// If we still have capacity and there are unprocessed files, check for next conflict
+		if started < m.maxConcurrent {
+			for i := 0; i < len(m.files); i++ {
+				if m.files[i].selected && m.files[i].status == "" && i != m.currentIdx {
+					dir := filepath.Dir(m.files[i].path)
+					base := filepath.Base(m.files[i].path)
+					output := filepath.Join(dir, "out_"+base)
+
+					if _, err := os.Stat(output); err == nil {
+						// Found next conflict, show prompt
+						m.showOverwritePrompt = true
+						m.overwriteCursor = 0
+						m.pendingOutputFile = output
+						m.currentIdx = i
+						break
+					}
+				}
+			}
+		}
+
+		return m, tea.Batch(cmds...)
 
 	case overwriteSkipMsg:
 		m.showOverwritePrompt = false
-		// Skip this file and move to next
-		for i := m.currentIdx + 1; i < len(m.files); i++ {
-			if m.files[i].selected {
-				m.currentIdx = i
-				return m, m.startProcessing()
+		// Unselect the skipped file
+		m.files[m.currentIdx].selected = false
+		m.totalToProcess--
+
+		// Check if we should start processing or look for next overwrite
+		if m.processingCount < m.maxConcurrent {
+			// Try to start more files
+			for i := 0; i < len(m.files); i++ {
+				if m.files[i].selected && m.files[i].status == "" {
+					dir := filepath.Dir(m.files[i].path)
+					base := filepath.Base(m.files[i].path)
+					output := filepath.Join(dir, "out_"+base)
+
+					if _, err := os.Stat(output); err == nil {
+						// Another overwrite conflict, show prompt
+						m.showOverwritePrompt = true
+						m.overwriteCursor = 0
+						m.pendingOutputFile = output
+						m.currentIdx = i
+						return m, nil
+					}
+
+					// No conflict, start processing
+					m.processing = true
+					return m, m.processFile(i)
+				}
 			}
 		}
-		// No more files to process
-		m.done = true
+
+		// Check if all done
+		if m.processingCount == 0 && m.totalToProcess == 0 {
+			m.done = true
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -274,10 +345,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, func() tea.Msg { return overwriteSkipMsg{} }
 				case 2: // Cancel all
 					m.showOverwritePrompt = false
-					m.processing = false
-					// Unselect all remaining files
-					for i := m.currentIdx; i < len(m.files); i++ {
-						m.files[i].selected = false
+					// Unselect all remaining unprocessed files
+					for i := 0; i < len(m.files); i++ {
+						if m.files[i].selected && m.files[i].status == "" {
+							m.files[i].selected = false
+							m.totalToProcess--
+						}
+					}
+					// If no more files processing, mark as done
+					if m.processingCount == 0 {
+						m.processing = false
+						if m.totalToProcess == 0 {
+							m.done = true
+						}
 					}
 					return m, nil
 				}
@@ -332,19 +412,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.files[msg.idx].status = "processing"
 		m.runningCmds[msg.idx] = msg.cmd
 		m.processingCount++
-		return m, m.continueListening()
+		// Return listener only for this message's channel
+		if ch, ok := m.msgChans[msg.idx]; ok {
+			return m, listenToChannel(ch)
+		}
+		return m, nil
 
 	case progressMsg:
 		m.files[msg.idx].progress = msg.progress
-		return m, m.continueListening()
+		// Return listener only for this message's channel
+		if ch, ok := m.msgChans[msg.idx]; ok {
+			return m, listenToChannel(ch)
+		}
+		return m, nil
 
 	case videoInfoMsg:
 		m.files[msg.idx].info = msg.info
-		return m, m.continueListening()
+		// Return listener only for this message's channel
+		if ch, ok := m.msgChans[msg.idx]; ok {
+			return m, listenToChannel(ch)
+		}
+		return m, nil
 
 	case outputInfoMsg:
 		m.files[msg.idx].outInfo = msg.info
-		return m, m.continueListening()
+		// Return listener only for this message's channel
+		if ch, ok := m.msgChans[msg.idx]; ok {
+			return m, listenToChannel(ch)
+		}
+		return m, nil
 
 	case doneMsg:
 		m.files[msg.idx].status = "done"
@@ -355,7 +451,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Find next unprocessed selected file
 		for i := 0; i < len(m.files); i++ {
 			if m.files[i].selected && m.files[i].status == "" {
-				// Found an unprocessed file, start it
+				// Check if file has overwrite conflict
+				dir := filepath.Dir(m.files[i].path)
+				base := filepath.Base(m.files[i].path)
+				output := filepath.Join(dir, "out_"+base)
+
+				if _, err := os.Stat(output); err == nil {
+					// Has overwrite conflict, show prompt
+					m.showOverwritePrompt = true
+					m.overwriteCursor = 0
+					m.pendingOutputFile = output
+					m.currentIdx = i
+					return m, nil
+				}
+
+				// No conflict, start processing
 				return m, m.processFile(i)
 			}
 		}
@@ -365,7 +475,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.processing = false
 			m.done = true
 		}
-		return m, m.continueListening()
+		return m, nil
 
 	case errorMsg:
 		m.files[msg.idx].status = "error"
@@ -373,35 +483,50 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(m.runningCmds, msg.idx)
 		m.processingCount--
 
-		// Continue processing other files
+		// Find next unprocessed selected file to start
+		for i := 0; i < len(m.files); i++ {
+			if m.files[i].selected && m.files[i].status == "" {
+				// Check if file has overwrite conflict
+				dir := filepath.Dir(m.files[i].path)
+				base := filepath.Base(m.files[i].path)
+				output := filepath.Join(dir, "out_"+base)
+
+				if _, err := os.Stat(output); err == nil {
+					// Has overwrite conflict, show prompt
+					m.showOverwritePrompt = true
+					m.overwriteCursor = 0
+					m.pendingOutputFile = output
+					m.currentIdx = i
+					return m, nil
+				}
+
+				// No conflict, start processing
+				return m, m.processFile(i)
+			}
+		}
+
+		// No more files to process
 		if m.processingCount == 0 {
 			m.processing = false
 		}
-		return m, m.continueListening()
+		return m, nil
 
 	case cancelMsg:
+		// Reset file status so it can be retried
+		m.files[msg.idx].status = ""
+		m.files[msg.idx].progress = 0
+		delete(m.runningCmds, msg.idx)
 		m.processingCount--
+
 		if m.processingCount == 0 {
 			m.processing = false
 		}
-		return m, m.continueListening()
+		return m, nil
 	}
 
 	return m, nil
 }
 
-func (m *model) continueListening() tea.Cmd {
-	if len(m.msgChans) == 0 {
-		return nil
-	}
-
-	// Listen to all channels simultaneously
-	var cmds []tea.Cmd
-	for _, ch := range m.msgChans {
-		cmds = append(cmds, listenToChannel(ch))
-	}
-	return tea.Batch(cmds...)
-}
 
 func (m *model) startProcessing() tea.Cmd {
 	// Count total files to process
@@ -415,6 +540,7 @@ func (m *model) startProcessing() tea.Cmd {
 	// Start up to maxConcurrent files
 	var cmds []tea.Cmd
 	started := 0
+	foundOverwrite := false
 
 	for i, f := range m.files {
 		if !f.selected || f.status != "" {
@@ -431,12 +557,16 @@ func (m *model) startProcessing() tea.Cmd {
 		output := filepath.Join(dir, "out_"+base)
 
 		if _, err := os.Stat(output); err == nil {
-			// File exists, show prompt
-			m.showOverwritePrompt = true
-			m.overwriteCursor = 0
-			m.pendingOutputFile = output
-			m.currentIdx = i
-			return nil
+			// File exists, show prompt for first conflict only
+			if !foundOverwrite {
+				m.showOverwritePrompt = true
+				m.overwriteCursor = 0
+				m.pendingOutputFile = output
+				m.currentIdx = i
+				foundOverwrite = true
+			}
+			// Skip this file for now, continue with others
+			continue
 		}
 
 		m.processing = true
@@ -542,7 +672,7 @@ func (m *model) processFile(idx int) tea.Cmd {
 			if cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == -1 {
 				// Process was killed, send cancel message and clean up partial output
 				os.Remove(output)
-				msgChan <- cancelMsg{}
+				msgChan <- cancelMsg{idx: idx}
 				return
 			}
 			msgChan <- errorMsg{idx: idx, err: fmt.Errorf("ffmpeg failed: %w", err)}
