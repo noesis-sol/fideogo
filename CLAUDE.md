@@ -82,3 +82,204 @@ The application compresses videos with these settings:
 - Resolution: Scaled to 1080p height
 - Audio: AAC at 96k bitrate
 - Output: Prefixed with `out_` in the same directory
+
+## Go Design Patterns
+
+- **Prefer composition over inheritance—embed structs rather than building deep hierarchies**
+```go
+  // Good: composition via embedding
+  type VideoCompressor struct {
+      *FFmpegEncoder
+      logger Logger
+  }
+
+  // Avoid: simulating inheritance through deep struct chains
+```
+
+- **Use interfaces at consumption sites, not declaration sites; accept interfaces, return concrete types**
+```go
+  // Good: interface defined where it's used
+  type Encoder interface {
+      Encode(input []byte) ([]byte, error)
+  }
+
+  func Compress(e Encoder, data []byte) ([]byte, error) {
+      return e.Encode(data)
+  }
+
+  // The concrete type doesn't declare "implements Encoder"—it just does
+```
+
+- **Apply the functional options pattern for configurable constructors**
+```go
+  type Option func(*Compressor)
+
+  func WithBitrate(b int) Option {
+      return func(c *Compressor) { c.bitrate = b }
+  }
+
+  func WithCodec(codec string) Option {
+      return func(c *Compressor) { c.codec = codec }
+  }
+
+  func NewCompressor(opts ...Option) *Compressor {
+      c := &Compressor{bitrate: 1000, codec: "h264"} // defaults
+      for _, opt := range opts {
+          opt(c)
+      }
+      return c
+  }
+
+  // Usage: NewCompressor(WithBitrate(2000), WithCodec("hevc"))
+```
+
+- **Keep functions short and single-purpose; if a function exceeds 30 lines, it likely needs decomposition**
+```go
+  // Instead of one 100-line function:
+  func ProcessVideo(path string) error {
+      meta, err := extractMetadata(path)
+      if err != nil {
+          return err
+      }
+      normalized, err := normalizeAudio(path, meta)
+      if err != nil {
+          return err
+      }
+      return compress(normalized, meta)
+  }
+```
+
+- **Use table-driven tests**
+```go
+  func TestBitrateCalculation(t *testing.T) {
+      tests := []struct {
+          name     string
+          width    int
+          height   int
+          expected int
+      }{
+          {"SD", 640, 480, 1000},
+          {"HD", 1920, 1080, 4000},
+          {"4K", 3840, 2160, 12000},
+      }
+
+      for _, tt := range tests {
+          t.Run(tt.name, func(t *testing.T) {
+              got := CalculateBitrate(tt.width, tt.height)
+              if got != tt.expected {
+                  t.Errorf("got %d, want %d", got, tt.expected)
+              }
+          })
+      }
+  }
+```
+
+- **Avoid package-level state and `init()` functions; pass dependencies explicitly**
+```go
+  // Avoid
+  var globalEncoder *Encoder
+
+  func init() {
+      globalEncoder = NewEncoder()
+  }
+
+  // Good: explicit dependency injection
+  func NewService(encoder *Encoder, logger Logger) *Service {
+      return &Service{encoder: encoder, logger: logger}
+  }
+```
+
+- **When error handling becomes repetitive, extract a helper or use a scanner-style pattern**
+```go
+  type Pipeline struct {
+      err error
+  }
+
+  func (p *Pipeline) Run(step func() error) {
+      if p.err != nil {
+          return // skip if already failed
+      }
+      p.err = step()
+  }
+
+  // Usage
+  p := &Pipeline{}
+  p.Run(func() error { return validateInput(path) })
+  p.Run(func() error { return extractAudio(path) })
+  p.Run(func() error { return compress(path) })
+  if p.err != nil {
+      return p.err
+  }
+```
+
+- **Prefer channels for coordination and mutexes for state protection—don't mix metaphors**
+```go
+  // Channels for signaling/coordination
+  done := make(chan struct{})
+  go func() {
+      processVideo()
+      close(done)
+  }()
+  <-done
+
+  // Mutex for protecting shared state
+  type Stats struct {
+      mu    sync.Mutex
+      count int
+  }
+
+  func (s *Stats) Increment() {
+      s.mu.Lock()
+      s.count++
+      s.mu.Unlock()
+  }
+```
+
+- **Name interfaces by what they do with an -er suffix, not what they are**
+```go
+  // Good
+  type Compressor interface {
+      Compress(data []byte) ([]byte, error)
+  }
+
+  type ProgressReporter interface {
+      Report(percent float64)
+  }
+
+  // Avoid
+  type VideoInterface interface { ... }
+  type CompressionManager interface { ... }
+```
+
+- **Keep the happy path unindented; handle errors and edge cases first with early returns**
+```go
+  // Good: happy path at left margin
+  func Compress(path string) (*Result, error) {
+      if path == "" {
+          return nil, errors.New("empty path")
+      }
+      if !fileExists(path) {
+          return nil, errors.New("file not found")
+      }
+
+      data, err := os.ReadFile(path)
+      if err != nil {
+          return nil, fmt.Errorf("reading file: %w", err)
+      }
+
+      return process(data), nil
+  }
+
+  // Avoid: deeply nested happy path
+  func Compress(path string) (*Result, error) {
+      if path != "" {
+          if fileExists(path) {
+              data, err := os.ReadFile(path)
+              if err == nil {
+                  return process(data), nil
+              }
+          }
+      }
+      return nil, errors.New("failed")
+  }
+```
