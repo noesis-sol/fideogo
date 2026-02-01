@@ -44,7 +44,7 @@ When making changes to this project, follow these steps:
 which fideogo
 ```
 
-This will return the full path (e.g., `/Users/michailmichailidis/.local/bin/fideogo`)
+This will return the full path (e.g., `/Users/<username>/.local/bin/fideogo`)
 
 ### 2. After Completing Any Task
 
