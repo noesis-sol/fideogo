@@ -1,6 +1,9 @@
-# 🎬 Fideogo - Video Compressor TUI
+# 🎬 FideoGo - Video Compressor with Charm TUI
 
 <div align="center">
+
+![Gemini_Generated_Image_97rzu397rzu397rz](https://github.com/user-attachments/assets/f1a5f222-ae95-4653-ad2a-63efae30858b)
+
 
 **A beautiful terminal interface for compressing video files with ffmpeg**
 
