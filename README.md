@@ -31,7 +31,7 @@
 
   ● MathPro-D Module 3_el.mp4
     ██████████████████████░░░░░░░░░░░░░░░░░░ 54%
-    In:  1920x1080 | h264 | 1.4 Mbps
+    In:  1920x1080 | MP4 (h264) | 1.4 Mbps
 
 Processing... (c or ctrl+c to cancel)
 ```
@@ -69,7 +69,28 @@ fideogo video.mp4
 # Use wildcards to select multiple files
 fideogo *.mp4
 fideogo /path/to/videos/*.mov
+
+# Convert to a specific format
+fideogo --format mkv video.mp4
+fideogo /path/to/videos --format mov
 ```
+
+### Output Format
+
+By default, output files keep the same format as the input. Use `--format` to convert to a different container:
+
+| Format | Description |
+|--------|-------------|
+| `mp4`  | MPEG-4 Part 14 — most universal, great for sharing and web |
+| `mov`  | QuickTime — ideal for Apple ecosystem and editing workflows |
+| `mkv`  | Matroska — flexible container, supports virtually any codec |
+
+```bash
+fideogo --format mp4 video.mov
+# Produces: out_video.mp4
+```
+
+The flag works in any position and can be combined with directories, file paths, or wildcards.
 
 ## ⌨️ Controls
 

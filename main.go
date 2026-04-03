@@ -26,6 +26,14 @@ type compressionConfig struct {
 	crf           string
 	audioBitrate  string
 	resolution    string
+	outputFormat  string // target container format (mp4, mov, mkv)
+}
+
+// validFormats lists the supported output container formats
+var validFormats = map[string]bool{
+	"mp4": true,
+	"mov": true,
+	"mkv": true,
 }
 
 const (
@@ -101,16 +109,21 @@ func newVideoService(config compressionConfig) *videoService {
 	return &videoService{config: config}
 }
 
-// getOutputPath returns the output path for a given input file
-func getOutputPath(inputPath string) string {
+// getOutputPath returns the output path for a given input file.
+// If outputFormat is non-empty, the extension is replaced with the target format.
+func getOutputPath(inputPath, outputFormat string) string {
 	dir := filepath.Dir(inputPath)
 	base := filepath.Base(inputPath)
+	if outputFormat != "" {
+		ext := filepath.Ext(base)
+		base = strings.TrimSuffix(base, ext) + "." + outputFormat
+	}
 	return filepath.Join(dir, outputPrefix+base)
 }
 
 // outputFileExists checks if the output file already exists
-func outputFileExists(inputPath string) bool {
-	output := getOutputPath(inputPath)
+func outputFileExists(inputPath, outputFormat string) bool {
+	output := getOutputPath(inputPath, outputFormat)
 	_, err := os.Stat(output)
 	return err == nil
 }
@@ -214,7 +227,8 @@ func (vs *videoService) getVideoInfo(path string) string {
 	if br, err := strconv.ParseFloat(strings.TrimSpace(bitrate), 64); err == nil {
 		bitrate = fmt.Sprintf("%.1f Mbps", br/1000000)
 	}
-	return fmt.Sprintf("%s | %s | %s", strings.TrimSpace(res), strings.TrimSpace(codec), bitrate)
+	format := strings.ToUpper(strings.TrimPrefix(filepath.Ext(path), "."))
+	return fmt.Sprintf("%s | %s (%s) | %s", strings.TrimSpace(res), format, strings.TrimSpace(codec), bitrate)
 }
 
 func (vs *videoService) runProbe(path, entries string, extra ...string) (string, error) {
@@ -234,24 +248,30 @@ func (vs *videoService) runProbe(path, entries string, extra ...string) (string,
 }
 
 func (vs *videoService) buildFFmpegCommand(inputPath, outputPath string) *exec.Cmd {
-	return exec.Command("ffmpeg", "-i", inputPath,
+	args := []string{
+		"-i", inputPath,
 		"-c:v", vs.config.codec, "-preset", vs.config.preset, "-crf", vs.config.crf,
-		"-vf", "scale=-2:"+vs.config.resolution,
+		"-vf", "scale=-2:" + vs.config.resolution,
 		"-c:a", "aac", "-b:a", vs.config.audioBitrate,
-		"-movflags", "+faststart",
-		"-progress", "pipe:1",
-		"-loglevel", "error",
-		"-y", outputPath)
+	}
+	// movflags is only valid for MP4/MOV containers
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(outputPath), "."))
+	if ext == "mp4" || ext == "mov" || ext == "m4v" {
+		args = append(args, "-movflags", "+faststart")
+	}
+	args = append(args, "-progress", "pipe:1", "-loglevel", "error", "-y", outputPath)
+	return exec.Command("ffmpeg", args...)
+}
+
+// Gradient stops for the progress bar: cyan -> green -> orange -> yellow
+var progressColorStops = []colorful.Color{
+	{R: 0.3, G: 0.8, B: 1.0}, // Cyan (0%)
+	{R: 0.2, G: 0.9, B: 0.2}, // Green (33%)
+	{R: 1.0, G: 0.5, B: 0.0}, // Orange (66%)
+	{R: 1.0, G: 1.0, B: 0.0}, // Yellow (100%)
 }
 
 func getProgressColor(progress float64) lipgloss.Color {
-	// Define gradient stops: cyan -> green -> orange -> yellow (cold to warm)
-	colorStops := []colorful.Color{
-		colorful.Color{R: 0.3, G: 0.8, B: 1.0},   // Cyan (0%)
-		colorful.Color{R: 0.2, G: 0.9, B: 0.2},   // Green (33%)
-		colorful.Color{R: 1.0, G: 0.5, B: 0.0},   // Orange (66%)
-		colorful.Color{R: 1.0, G: 1.0, B: 0.0},   // Yellow (100%)
-	}
 
 	// Clamp progress to [0, 1]
 	if progress < 0 {
@@ -262,20 +282,20 @@ func getProgressColor(progress float64) lipgloss.Color {
 	}
 
 	// Calculate which segment we're in
-	numSegments := float64(len(colorStops) - 1)
+	numSegments := float64(len(progressColorStops) - 1)
 	segment := progress * numSegments
 	segmentIndex := int(segment)
 
 	// Handle edge case for 100%
-	if segmentIndex >= len(colorStops)-1 {
-		c := colorStops[len(colorStops)-1]
+	if segmentIndex >= len(progressColorStops)-1 {
+		c := progressColorStops[len(progressColorStops)-1]
 		return lipgloss.Color(c.Hex())
 	}
 
 	// Interpolate between the two colors in this segment
 	t := segment - float64(segmentIndex)
-	c1 := colorStops[segmentIndex]
-	c2 := colorStops[segmentIndex+1]
+	c1 := progressColorStops[segmentIndex]
+	c2 := progressColorStops[segmentIndex+1]
 	interpolated := c1.BlendRgb(c2, t)
 
 	return lipgloss.Color(interpolated.Hex())
@@ -341,7 +361,7 @@ func (m model) handleOverwriteConfirm() (model, tea.Cmd) {
 		}
 
 		if m.files[i].selected && m.files[i].status == "" && i != m.currentIdx {
-			if outputFileExists(m.files[i].path) {
+			if outputFileExists(m.files[i].path, m.config.outputFormat) {
 				// Has overwrite conflict, skip for now
 				continue
 			}
@@ -355,11 +375,11 @@ func (m model) handleOverwriteConfirm() (model, tea.Cmd) {
 	if m.processingCount+len(cmds) < m.config.maxConcurrent {
 		for i := 0; i < len(m.files); i++ {
 			if m.files[i].selected && m.files[i].status == "" && i != m.currentIdx {
-				if outputFileExists(m.files[i].path) {
+				if outputFileExists(m.files[i].path, m.config.outputFormat) {
 					// Found next conflict, show prompt
 					m.showOverwritePrompt = true
 					m.overwriteCursor = 0
-					m.pendingOutputFile = getOutputPath(m.files[i].path)
+					m.pendingOutputFile = getOutputPath(m.files[i].path, m.config.outputFormat)
 					m.currentIdx = i
 					break
 				}
@@ -426,11 +446,11 @@ func (m model) tryStartNextFile() (model, tea.Cmd) {
 		for i := 0; i < len(m.files); i++ {
 			if m.files[i].selected && m.files[i].status == "" {
 				// Check if file has overwrite conflict
-				if outputFileExists(m.files[i].path) {
+				if outputFileExists(m.files[i].path, m.config.outputFormat) {
 					// Has overwrite conflict, show prompt
 					m.showOverwritePrompt = true
 					m.overwriteCursor = 0
-					m.pendingOutputFile = getOutputPath(m.files[i].path)
+					m.pendingOutputFile = getOutputPath(m.files[i].path, m.config.outputFormat)
 					m.currentIdx = i
 					return m, nil
 				}
@@ -629,11 +649,11 @@ func (m model) handleOverwriteSkip() (model, tea.Cmd) {
 		// Try to start more files
 		for i := 0; i < len(m.files); i++ {
 			if m.files[i].selected && m.files[i].status == "" {
-				if outputFileExists(m.files[i].path) {
+				if outputFileExists(m.files[i].path, m.config.outputFormat) {
 					// Another overwrite conflict, show prompt
 					m.showOverwritePrompt = true
 					m.overwriteCursor = 0
-					m.pendingOutputFile = getOutputPath(m.files[i].path)
+					m.pendingOutputFile = getOutputPath(m.files[i].path, m.config.outputFormat)
 					m.currentIdx = i
 					return m, nil
 				}
@@ -719,12 +739,12 @@ func (m *model) startProcessing() tea.Cmd {
 		}
 
 		// Check if output file already exists
-		if outputFileExists(f.path) {
+		if outputFileExists(f.path, m.config.outputFormat) {
 			// File exists, show prompt for first conflict only
 			if !foundOverwrite {
 				m.showOverwritePrompt = true
 				m.overwriteCursor = 0
-				m.pendingOutputFile = getOutputPath(f.path)
+				m.pendingOutputFile = getOutputPath(f.path, m.config.outputFormat)
 				m.currentIdx = i
 				foundOverwrite = true
 			}
@@ -775,7 +795,7 @@ func (m *model) processFile(idx int) tea.Cmd {
 			msgChan <- videoInfoMsg{idx: idx, info: info}
 		}
 
-		output := getOutputPath(f.path)
+		output := getOutputPath(f.path, m.config.outputFormat)
 
 		// Get duration for progress calculation
 		durStr, err := m.videoService.runProbe(f.path, "format=duration")
@@ -873,7 +893,7 @@ func (m *model) processFile(idx int) tea.Cmd {
 			if stderrOutput := stderrBuf.String(); stderrOutput != "" {
 				errMsg = fmt.Sprintf("%s\nDetails: %s", errMsg, strings.TrimSpace(stderrOutput))
 			}
-			msgChan <- errorMsg{idx: idx, err: fmt.Errorf(errMsg)}
+			msgChan <- errorMsg{idx: idx, err: fmt.Errorf("%s", errMsg)}
 			return
 		}
 
@@ -1272,6 +1292,23 @@ func checkDependencies() error {
 	return nil
 }
 
+// parseArgs extracts the --format flag and positional path from args in any order.
+func parseArgs(args []string) (format, path string) {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--format" || args[i] == "-format" {
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "Error: --format requires a value\nSupported formats: mp4, mov, mkv\n")
+				os.Exit(1)
+			}
+			format = args[i+1]
+			i++ // skip the value
+		} else {
+			path = args[i]
+		}
+	}
+	return
+}
+
 func main() {
 	// Check dependencies before starting
 	if err := checkDependencies(); err != nil {
@@ -1279,11 +1316,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	format, path := parseArgs(os.Args[1:])
+
+	if format != "" && !validFormats[format] {
+		fmt.Fprintf(os.Stderr, "Error: unsupported format %q\nSupported formats: mp4, mov, mkv\n", format)
+		os.Exit(1)
+	}
+
 	var m model
 	var err error
 
-	if len(os.Args) > 1 {
-		m, err = createModelFromPath(os.Args[1])
+	if path != "" {
+		m, err = createModelFromPath(path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -1291,6 +1335,9 @@ func main() {
 	} else {
 		m = initialModel(".")
 	}
+
+	m.config.outputFormat = format
+	m.videoService = newVideoService(m.config)
 
 	p := tea.NewProgram(m, tea.WithoutSignalHandler())
 	if _, err := p.Run(); err != nil {
