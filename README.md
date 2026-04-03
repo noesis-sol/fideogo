@@ -73,7 +73,31 @@ fideogo /path/to/videos/*.mov
 # Convert to a specific format
 fideogo --format mkv video.mp4
 fideogo /path/to/videos --format mov
+
+# Compress to a specific size
+fideogo --size sm video.mp4
+fideogo --size large /path/to/videos
 ```
+
+### Output Size
+
+Control the output resolution height with `--size`:
+
+| Size | Aliases | Resolution |
+|------|---------|------------|
+| Small | `sm`, `small` | 540p |
+| Medium | `md`, `medium` | 1080p (default) |
+| Large | `lg`, `large` | 2160p |
+
+```bash
+fideogo --size sm video.mp4
+# Compresses to 540p height
+
+fideogo --size large --format mkv video.mp4
+# Compresses to 2160p height as MKV
+```
+
+The width is automatically calculated to preserve the original aspect ratio.
 
 ### Output Format
 
@@ -134,7 +158,7 @@ Fideogo uses optimized ffmpeg settings for the best balance between quality and 
 | **Codec** | H.264 (libx264) | Universal compatibility |
 | **Preset** | slow | Better compression efficiency |
 | **CRF** | 28 | Quality level (lower = better quality) |
-| **Resolution** | 1080p | Scaled to max 1080p height |
+| **Resolution** | 1080p | Scaled height (`--size` flag: 540p / 1080p / 2160p) |
 | **Audio Codec** | AAC | High compatibility |
 | **Audio Bitrate** | 96k | Optimized for voice/music |
 | **Output** | `out_{filename}` | Prefixed in same directory |

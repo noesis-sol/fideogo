@@ -36,6 +36,16 @@ var validFormats = map[string]bool{
 	"mkv": true,
 }
 
+// validSizes maps size aliases to resolution heights
+var validSizes = map[string]string{
+	"sm":     "540",
+	"small":  "540",
+	"md":     "1080",
+	"medium": "1080",
+	"lg":     "2160",
+	"large":  "2160",
+}
+
 const (
 	outputPrefix = "out_"
 )
@@ -1292,8 +1302,8 @@ func checkDependencies() error {
 	return nil
 }
 
-// parseArgs extracts the --format flag and positional path from args in any order.
-func parseArgs(args []string) (format, path string) {
+// parseArgs extracts the --format and --size flags and positional path from args in any order.
+func parseArgs(args []string) (format, size, path string) {
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--format" || args[i] == "-format" {
 			if i+1 >= len(args) {
@@ -1301,6 +1311,13 @@ func parseArgs(args []string) (format, path string) {
 				os.Exit(1)
 			}
 			format = args[i+1]
+			i++ // skip the value
+		} else if args[i] == "--size" || args[i] == "-size" {
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "Error: --size requires a value\nSupported sizes: sm, small, md, medium, lg, large\n")
+				os.Exit(1)
+			}
+			size = args[i+1]
 			i++ // skip the value
 		} else {
 			path = args[i]
@@ -1316,11 +1333,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	format, path := parseArgs(os.Args[1:])
+	format, size, path := parseArgs(os.Args[1:])
 
 	if format != "" && !validFormats[format] {
 		fmt.Fprintf(os.Stderr, "Error: unsupported format %q\nSupported formats: mp4, mov, mkv\n", format)
 		os.Exit(1)
+	}
+
+	if size != "" {
+		res, ok := validSizes[strings.ToLower(size)]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Error: unsupported size %q\nSupported sizes: sm, small, md, medium, lg, large\n", size)
+			os.Exit(1)
+		}
+		defaultConfig.resolution = res
 	}
 
 	var m model
