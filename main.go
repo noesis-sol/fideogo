@@ -238,7 +238,24 @@ func (vs *videoService) getVideoInfo(path string) string {
 		bitrate = fmt.Sprintf("%.1f Mbps", br/1000000)
 	}
 	format := strings.ToUpper(strings.TrimPrefix(filepath.Ext(path), "."))
-	return fmt.Sprintf("%s | %s (%s) | %s", strings.TrimSpace(res), format, strings.TrimSpace(codec), bitrate)
+	size := "unknown size"
+	if fi, err := os.Stat(path); err == nil {
+		size = formatFileSize(fi.Size())
+	}
+	return fmt.Sprintf("%s | %s (%s) | %s | %s", strings.TrimSpace(res), format, strings.TrimSpace(codec), bitrate, size)
+}
+
+func formatFileSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 func (vs *videoService) runProbe(path, entries string, extra ...string) (string, error) {
