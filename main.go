@@ -278,7 +278,7 @@ func (vs *videoService) buildFFmpegCommand(inputPath, outputPath string) *exec.C
 	args := []string{
 		"-i", inputPath,
 		"-c:v", vs.config.codec, "-preset", vs.config.preset, "-crf", vs.config.crf,
-		"-vf", "scale=-2:" + vs.config.resolution,
+		"-vf", "scale=-2:'min(" + vs.config.resolution + ",ih)'",
 		"-c:a", "aac", "-b:a", vs.config.audioBitrate,
 	}
 	// movflags is only valid for MP4/MOV containers
