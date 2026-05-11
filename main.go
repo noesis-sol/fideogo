@@ -724,7 +724,8 @@ func (m model) handleOverwriteSkip() (model, tea.Cmd) {
 	}
 
 	// Check if all done
-	if m.processingCount == 0 && m.totalToProcess == 0 {
+	if m.processingCount == 0 && !m.hasUnstartedFiles() {
+		m.processing = false
 		m.done = true
 	}
 	return m, nil
