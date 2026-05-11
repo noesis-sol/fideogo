@@ -847,9 +847,6 @@ func (m *model) processFile(idx int) tea.Cmd {
 
 		cmd := m.videoService.buildFFmpegCommand(f.path, output)
 
-		// Send processing start message with the command
-		msgChan <- processingStartMsg{idx: idx, cmd: cmd}
-
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			msgChan <- errorMsg{idx: idx, err: fmt.Errorf("failed to create stdout pipe: %w", err)}
@@ -866,6 +863,8 @@ func (m *model) processFile(idx int) tea.Cmd {
 			msgChan <- errorMsg{idx: idx, err: fmt.Errorf("failed to start ffmpeg: %w", err)}
 			return
 		}
+
+		msgChan <- processingStartMsg{idx: idx, cmd: cmd}
 
 		scanner := bufio.NewScanner(stdout)
 		var stderrBuf strings.Builder
