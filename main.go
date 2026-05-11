@@ -1104,6 +1104,7 @@ func collectVideosFromPattern(pattern string) ([]videoFile, error) {
 	}
 
 	var allFiles []videoFile
+	seen := make(map[string]bool)
 	for _, match := range matches {
 		info, err := os.Stat(match)
 		if err != nil {
@@ -1112,7 +1113,12 @@ func collectVideosFromPattern(pattern string) ([]videoFile, error) {
 
 		if info.IsDir() {
 			dirFiles := findVideos(match)
-			allFiles = append(allFiles, dirFiles...)
+			for _, f := range dirFiles {
+				if !seen[f.path] {
+					seen[f.path] = true
+					allFiles = append(allFiles, f)
+				}
+			}
 		} else {
 			ext := strings.ToLower(filepath.Ext(match))
 			if videoExtensions[ext] {
@@ -1120,10 +1126,13 @@ func collectVideosFromPattern(pattern string) ([]videoFile, error) {
 				if err != nil {
 					continue
 				}
-				allFiles = append(allFiles, videoFile{
-					path: absPath,
-					name: filepath.Base(match),
-				})
+				if !seen[absPath] {
+					seen[absPath] = true
+					allFiles = append(allFiles, videoFile{
+						path: absPath,
+						name: filepath.Base(match),
+					})
+				}
 			}
 		}
 	}
