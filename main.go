@@ -861,11 +861,7 @@ func (m *model) processFile(idx int) tea.Cmd {
 			msgChan <- errorMsg{idx: idx, err: fmt.Errorf("failed to probe video: %w", err)}
 			return
 		}
-		duration, err := strconv.ParseFloat(strings.TrimSpace(durStr), 64)
-		if err != nil {
-			msgChan <- errorMsg{idx: idx, err: fmt.Errorf("failed to get video duration: %w", err)}
-			return
-		}
+		duration, _ := strconv.ParseFloat(strings.TrimSpace(durStr), 64)
 
 		cmd := m.videoService.buildFFmpegCommand(f.path, output)
 
@@ -903,14 +899,16 @@ func (m *model) processFile(idx int) tea.Cmd {
 						continue
 					}
 					timeSec := float64(timeMs) / 1000000
+					var prog float64
 					if duration > 0 {
-						prog := timeSec / duration
+						prog = timeSec / duration
 						if prog > 1 {
 							prog = 1
 						}
-						// Send progress through channel
-						msgChan <- progressMsg{idx: idx, progress: prog}
+					} else {
+						prog = 0.5
 					}
+					msgChan <- progressMsg{idx: idx, progress: prog}
 				}
 			}
 		}()
