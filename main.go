@@ -506,11 +506,20 @@ func (m model) handleDone(msg doneMsg) (model, tea.Cmd) {
 	}
 
 	// No more files to process
-	if m.processingCount == 0 {
+	if m.processingCount == 0 && !m.showOverwritePrompt && !m.hasUnstartedFiles() {
 		m.processing = false
 		m.done = true
 	}
 	return m, nil
+}
+
+func (m model) hasUnstartedFiles() bool {
+	for _, f := range m.files {
+		if f.selected && f.status == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (m model) handleError(msg errorMsg) (model, tea.Cmd) {
@@ -534,7 +543,7 @@ func (m model) handleError(msg errorMsg) (model, tea.Cmd) {
 	}
 
 	// No more files to process
-	if m.processingCount == 0 {
+	if m.processingCount == 0 && !m.showOverwritePrompt && !m.hasUnstartedFiles() {
 		m.processing = false
 	}
 	return m, nil
@@ -551,7 +560,7 @@ func (m model) handleCancel(msg cancelMsg) (model, tea.Cmd) {
 		m.processingCount--
 	}
 
-	if m.processingCount == 0 {
+	if m.processingCount == 0 && !m.showOverwritePrompt && !m.hasUnstartedFiles() {
 		m.processing = false
 	}
 	return m, nil
