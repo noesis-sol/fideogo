@@ -1365,13 +1365,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	var resolution string
 	if size != "" {
 		res, ok := validSizes[strings.ToLower(size)]
 		if !ok {
 			fmt.Fprintf(os.Stderr, "Error: unsupported size %q\nSupported sizes: sm, small, md, medium, lg, large\n", size)
 			os.Exit(1)
 		}
-		defaultConfig.resolution = res
+		resolution = res
 	}
 
 	var m model
@@ -1387,6 +1388,9 @@ func main() {
 		m = initialModel(".")
 	}
 
+	if resolution != "" {
+		m.config.resolution = resolution
+	}
 	m.config.outputFormat = format
 	m.videoService = newVideoService(m.config)
 
