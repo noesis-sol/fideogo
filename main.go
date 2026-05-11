@@ -202,26 +202,48 @@ func findVideos(dir string) []videoFile {
 		return files
 	}
 
+	entryNames := make(map[string]bool)
 	for _, entry := range entries {
-		// Skip directories
+		if !entry.IsDir() {
+			entryNames[entry.Name()] = true
+		}
+	}
+
+	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 
 		name := entry.Name()
-
-		// Skip output files (those with the output prefix)
-		if strings.HasPrefix(name, outputPrefix) {
+		ext := strings.ToLower(filepath.Ext(name))
+		if !videoExtensions[ext] {
 			continue
 		}
 
-		ext := strings.ToLower(filepath.Ext(name))
-		if videoExtensions[ext] {
-			files = append(files, videoFile{
-				path: filepath.Join(dir, name),
-				name: name,
-			})
+		// Skip output files only if a corresponding source file exists
+		if strings.HasPrefix(name, outputPrefix) {
+			sourceName := strings.TrimPrefix(name, outputPrefix)
+			if entryNames[sourceName] {
+				continue
+			}
+			// Also check if source exists with a different extension (format conversion)
+			sourceBase := strings.TrimSuffix(sourceName, filepath.Ext(sourceName))
+			hasSource := false
+			for srcExt := range videoExtensions {
+				if entryNames[sourceBase+srcExt] {
+					hasSource = true
+					break
+				}
+			}
+			if hasSource {
+				continue
+			}
 		}
+
+		files = append(files, videoFile{
+			path: filepath.Join(dir, name),
+			name: name,
+		})
 	}
 	return files
 }
