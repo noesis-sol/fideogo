@@ -1349,23 +1349,39 @@ func checkDependencies() error {
 	return nil
 }
 
+// parseFlagValue extracts the value from --flag=value or --flag value syntax.
+// Returns the value and how many args were consumed (0 for =value, 1 for space-separated).
+func parseFlagValue(args []string, i int, name, hint string) (string, int) {
+	arg := args[i]
+	if eqIdx := strings.Index(arg, "="); eqIdx != -1 {
+		val := arg[eqIdx+1:]
+		if val == "" {
+			fmt.Fprintf(os.Stderr, "Error: %s requires a value\n%s\n", name, hint)
+			os.Exit(1)
+		}
+		return val, 0
+	}
+	if i+1 >= len(args) {
+		fmt.Fprintf(os.Stderr, "Error: %s requires a value\n%s\n", name, hint)
+		os.Exit(1)
+	}
+	return args[i+1], 1
+}
+
 // parseArgs extracts the --format and --size flags and positional path from args in any order.
 func parseArgs(args []string) (format, size, path string) {
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--format" || args[i] == "-format" {
-			if i+1 >= len(args) {
-				fmt.Fprintf(os.Stderr, "Error: --format requires a value\nSupported formats: mp4, mov, mkv\n")
-				os.Exit(1)
-			}
-			format = args[i+1]
-			i++ // skip the value
-		} else if args[i] == "--size" || args[i] == "-size" {
-			if i+1 >= len(args) {
-				fmt.Fprintf(os.Stderr, "Error: --size requires a value\nSupported sizes: sm, small, md, medium, lg, large\n")
-				os.Exit(1)
-			}
-			size = args[i+1]
-			i++ // skip the value
+		arg := args[i]
+		flagName := strings.SplitN(arg, "=", 2)[0]
+
+		if flagName == "--format" || flagName == "-format" {
+			val, skip := parseFlagValue(args, i, "--format", "Supported formats: mp4, mov, mkv")
+			format = val
+			i += skip
+		} else if flagName == "--size" || flagName == "-size" {
+			val, skip := parseFlagValue(args, i, "--size", "Supported sizes: sm, small, md, medium, lg, large")
+			size = val
+			i += skip
 		} else if args[i] == "--help" || args[i] == "-h" {
 			fmt.Print("Usage: fideogo [options] [path|pattern]\n\n")
 			fmt.Print("Options:\n")
