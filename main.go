@@ -1344,6 +1344,23 @@ func parseArgs(args []string) (format, size, path string) {
 			}
 			size = args[i+1]
 			i++ // skip the value
+		} else if args[i] == "--help" || args[i] == "-h" {
+			fmt.Print("Usage: fideogo [options] [path|pattern]\n\n")
+			fmt.Print("Options:\n")
+			fmt.Print("  --format <fmt>   Output format: mp4, mov, mkv\n")
+			fmt.Print("  --size <size>    Target size: sm/small (540p), md/medium (1080p), lg/large (2160p)\n")
+			fmt.Print("  --help, -h       Show this help message\n\n")
+			fmt.Print("Examples:\n")
+			fmt.Print("  fideogo                     Compress videos in current directory\n")
+			fmt.Print("  fideogo video.mp4            Compress a single file\n")
+			fmt.Print("  fideogo /path/to/dir         Compress videos in a directory\n")
+			fmt.Print("  fideogo '*.mov'              Compress matching files\n")
+			fmt.Print("  fideogo --format mkv .       Convert to MKV format\n")
+			fmt.Print("  fideogo --size sm video.mp4  Compress to 540p\n")
+			os.Exit(0)
+		} else if path != "" {
+			fmt.Fprintf(os.Stderr, "Error: unexpected argument %q (only one path allowed)\n", args[i])
+			os.Exit(1)
 		} else {
 			path = args[i]
 		}
