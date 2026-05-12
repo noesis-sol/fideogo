@@ -443,12 +443,16 @@ func (m model) handleOverwriteConfirm() (model, tea.Cmd) {
 }
 
 func (m model) handleProcessingStart(msg processingStartMsg) (model, tea.Cmd) {
-	// If user cancelled, don't register this file as processing
 	if m.userCancelled {
-		// Clean up and reset file to allow retry
+		if msg.cmd != nil && msg.cmd.Process != nil {
+			msg.cmd.Process.Kill()
+		}
 		m.files[msg.idx].status = ""
 		m.files[msg.idx].progress = 0
 		delete(m.msgChans, msg.idx)
+		if m.processingCount == 0 {
+			m.processing = false
+		}
 		return m, nil
 	}
 
@@ -491,7 +495,7 @@ func (m model) handleOutputInfo(msg outputInfoMsg) (model, tea.Cmd) {
 
 func (m model) tryStartNextFile() (model, tea.Cmd) {
 	// Find next unprocessed selected file only if we have capacity and no prompt is showing
-	if m.processingCount < m.config.maxConcurrent && !m.showOverwritePrompt {
+	if m.processingCount < m.config.maxConcurrent && !m.showOverwritePrompt && !m.userCancelled {
 		for i := 0; i < len(m.files); i++ {
 			if m.files[i].selected && m.files[i].status == "" {
 				// Check if file has overwrite conflict
@@ -528,9 +532,11 @@ func (m model) handleDone(msg doneMsg) (model, tea.Cmd) {
 	}
 
 	// No more files to process
-	if m.processingCount == 0 && !m.showOverwritePrompt && !m.hasUnstartedFiles() {
+	if m.processingCount == 0 && (m.userCancelled || (!m.showOverwritePrompt && !m.hasUnstartedFiles())) {
 		m.processing = false
-		m.done = true
+		if !m.userCancelled {
+			m.done = true
+		}
 	}
 	return m, nil
 }
@@ -565,7 +571,7 @@ func (m model) handleError(msg errorMsg) (model, tea.Cmd) {
 	}
 
 	// No more files to process
-	if m.processingCount == 0 && !m.showOverwritePrompt && !m.hasUnstartedFiles() {
+	if m.processingCount == 0 && (m.userCancelled || (!m.showOverwritePrompt && !m.hasUnstartedFiles())) {
 		m.processing = false
 	}
 	return m, nil
@@ -582,7 +588,7 @@ func (m model) handleCancel(msg cancelMsg) (model, tea.Cmd) {
 		m.processingCount--
 	}
 
-	if m.processingCount == 0 && !m.showOverwritePrompt && !m.hasUnstartedFiles() {
+	if m.processingCount == 0 && (m.userCancelled || (!m.showOverwritePrompt && !m.hasUnstartedFiles())) {
 		m.processing = false
 	}
 	return m, nil
