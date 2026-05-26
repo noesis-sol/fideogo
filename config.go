@@ -1,0 +1,69 @@
+package main
+
+import "runtime"
+
+// compressionConfig holds configuration for video compression.
+type compressionConfig struct {
+	maxConcurrent int
+	codec         string
+	preset        string
+	crf           string
+	audioBitrate  string
+	resolution    string
+	outputFormat  string // target container format (mp4, mov, mkv)
+	hwAccel       bool   // use hardware encoder (h264_videotoolbox on macOS)
+	hwQuality     string // -q:v value for hardware encoder (0-100, higher = better)
+}
+
+const outputPrefix = "out_"
+
+// autoMaxConcurrent picks a sensible parallelism for software x264 encodes:
+// 1 job per ~4 cores, clamped to [2, 4]. Each ffmpeg job still gets a thread
+// budget via autoThreadsPerJob so 2 well-budgeted jobs beat 4 thrashing ones.
+func autoMaxConcurrent() int {
+	n := runtime.NumCPU() / 4
+	if n < 2 {
+		n = 2
+	}
+	if n > 4 {
+		n = 4
+	}
+	return n
+}
+
+// autoThreadsPerJob divides available cores across concurrent ffmpeg jobs.
+func autoThreadsPerJob(maxConcurrent int) int {
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
+	t := runtime.NumCPU() / maxConcurrent
+	if t < 1 {
+		t = 1
+	}
+	return t
+}
+
+var validFormats = map[string]bool{
+	"mp4": true,
+	"mov": true,
+	"mkv": true,
+}
+
+var validSizes = map[string]string{
+	"sm":     "540",
+	"small":  "540",
+	"md":     "1080",
+	"medium": "1080",
+	"lg":     "2160",
+	"large":  "2160",
+}
+
+var defaultConfig = compressionConfig{
+	maxConcurrent: autoMaxConcurrent(),
+	codec:         "libx264",
+	preset:        "medium",
+	crf:           "28",
+	audioBitrate:  "96k",
+	resolution:    "1080",
+	hwQuality:     "65",
+}

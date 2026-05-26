@@ -51,12 +51,12 @@ This will return the full path (e.g., `/Users/<username>/.local/bin/fideogo`)
 **ALWAYS** compile and replace the binary at the location found in step 1:
 
 ```bash
-go build -o fideogo main.go && mv fideogo <FULL_PATH_FROM_WHICH_COMMAND>
+go build -o fideogo . && mv fideogo <FULL_PATH_FROM_WHICH_COMMAND>
 ```
 
 For example:
 ```bash
-go build -o fideogo main.go && mv fideogo /Users/michailmichailidis/.local/bin/fideogo
+go build -o fideogo . && mv fideogo /Users/michailmichailidis/.local/bin/fideogo
 ```
 
 ### 3. Never Skip This Step
@@ -66,8 +66,16 @@ The user expects the binary to be updated after every code change. Do not ask pe
 ## Project Structure
 
 ```
-compress-tui/
-├── main.go          # Main application code
+fideogo/
+├── main.go          # Entry point: CLI parsing, dep check, program bootstrap
+├── config.go        # compressionConfig, defaults, autoMaxConcurrent, validators
+├── discover.go      # videoFile, findVideos, collectVideosFromPattern
+├── probe.go         # videoMetadata + ffprobe (single-call) + formatVideoInfo
+├── encode.go        # videoService, buildFFmpegCommand, processFile worker
+├── model.go         # Bubble Tea model, msg types, Init, Update dispatch
+├── handlers.go      # handleX methods + fillSlots slot-filling state machine
+├── view.go          # View() + lipgloss styles + progress gradient
+├── errorui.go       # Missing-ffmpeg installation help dialog
 ├── go.mod           # Go module dependencies
 ├── go.sum           # Dependency checksums
 └── CLAUDE.md        # This file
