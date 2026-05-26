@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
@@ -52,7 +53,7 @@ const (
 
 var (
 	defaultConfig = compressionConfig{
-		maxConcurrent: 3,
+		maxConcurrent: 4,
 		channelBuffer: 100,
 		codec:         "libx264",
 		preset:        "slow",
@@ -144,6 +145,7 @@ type model struct {
 	processing          bool
 	currentIdx          int
 	progressBar         progress.Model
+	spinner             spinner.Model
 	done                bool
 	err                 error
 	msgChans            map[int]chan tea.Msg
@@ -361,6 +363,10 @@ func newModel(files []videoFile) model {
 		progress.WithoutPercentage(),
 	)
 
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+
 	// Auto-select if there's only one file
 	if len(files) == 1 {
 		files[0].selected = true
@@ -370,6 +376,7 @@ func newModel(files []videoFile) model {
 	return model{
 		files:        files,
 		progressBar:  p,
+		spinner:      sp,
 		msgChans:     make(map[int]chan tea.Msg),
 		runningCmds:  make(map[int]*exec.Cmd),
 		config:       config,
@@ -456,12 +463,22 @@ func (m model) handleProcessingStart(msg processingStartMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 
+	wasIdle := m.processingCount == 0
 	m.files[msg.idx].status = "processing"
 	m.runningCmds[msg.idx] = msg.cmd
 	m.processingCount++
-	// Return listener only for this message's channel
+
+	var cmds []tea.Cmd
 	if ch, ok := m.msgChans[msg.idx]; ok {
-		return m, listenToChannel(ch)
+		cmds = append(cmds, listenToChannel(ch))
+	}
+	// Start the spinner tick loop on 0→1 transition; subsequent ticks
+	// self-perpetuate via spinner.Update.
+	if wasIdle {
+		cmds = append(cmds, m.spinner.Tick)
+	}
+	if len(cmds) > 0 {
+		return m, tea.Batch(cmds...)
 	}
 	return m, nil
 }
@@ -662,7 +679,7 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (model, tea.Cmd) {
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
-	case "q":
+	case "q", "esc":
 		if !m.processing {
 			return m, tea.Quit
 		}
@@ -771,6 +788,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case cancelMsg:
 		return m.handleCancel(msg)
+
+	case spinner.TickMsg:
+		if m.processingCount == 0 {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 	}
 
 	return m, nil
@@ -993,6 +1018,8 @@ func (m model) View() string {
 
 	if len(m.files) == 0 {
 		s.WriteString(dimStyle.Render("No video files found in current directory."))
+		s.WriteString("\n\n")
+		s.WriteString(helpTextStyle.Render("Press ") + keyStyle.Render("esc") + helpTextStyle.Render(" or ") + keyStyle.Render("q") + helpTextStyle.Render(" to exit."))
 		return s.String()
 	}
 
@@ -1002,9 +1029,23 @@ func (m model) View() string {
 			cursor = "▸ "
 		}
 
-		checkbox := "○"
+		marker := "○"
+		markerStyle := dimStyle
 		if f.selected {
-			checkbox = "●"
+			marker = "●"
+			markerStyle = normalStyle
+		}
+
+		// Differentiate in-progress vs waiting while a batch is running
+		useSpinner := false
+		if m.processing && f.selected {
+			switch f.status {
+			case "processing":
+				useSpinner = true
+			case "":
+				marker = "○"
+				markerStyle = dimStyle
+			}
 		}
 
 		style := normalStyle
@@ -1012,8 +1053,13 @@ func (m model) View() string {
 			style = selectedStyle
 		}
 
-		line := fmt.Sprintf("%s%s %s", cursor, checkbox, f.name)
-		s.WriteString(style.Render(line))
+		s.WriteString(style.Render(cursor))
+		if useSpinner {
+			s.WriteString(m.spinner.View())
+		} else {
+			s.WriteString(markerStyle.Render(marker))
+		}
+		s.WriteString(style.Render(" " + f.name))
 
 		if f.status == "processing" {
 			s.WriteString("\n")
