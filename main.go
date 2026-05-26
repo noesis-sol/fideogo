@@ -28,6 +28,34 @@ type compressionConfig struct {
 	audioBitrate  string
 	resolution    string
 	outputFormat  string // target container format (mp4, mov, mkv)
+	hwAccel       bool   // use hardware encoder (h264_videotoolbox on macOS)
+	hwQuality     string // -q:v value for hardware encoder (0-100, higher = better)
+}
+
+// autoMaxConcurrent picks a sensible parallelism for software x264 encodes:
+// 1 job per ~4 cores, clamped to [2, 4]. Each ffmpeg job still gets a thread
+// budget via autoThreadsPerJob so 2 well-budgeted jobs beat 4 thrashing ones.
+func autoMaxConcurrent() int {
+	n := runtime.NumCPU() / 4
+	if n < 2 {
+		n = 2
+	}
+	if n > 4 {
+		n = 4
+	}
+	return n
+}
+
+// autoThreadsPerJob divides available cores across concurrent ffmpeg jobs.
+func autoThreadsPerJob(maxConcurrent int) int {
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
+	t := runtime.NumCPU() / maxConcurrent
+	if t < 1 {
+		t = 1
+	}
+	return t
 }
 
 // validFormats lists the supported output container formats
@@ -53,13 +81,14 @@ const (
 
 var (
 	defaultConfig = compressionConfig{
-		maxConcurrent: 4,
+		maxConcurrent: autoMaxConcurrent(),
 		channelBuffer: 100,
 		codec:         "libx264",
-		preset:        "slow",
+		preset:        "medium",
 		crf:           "28",
 		audioBitrate:  "96k",
 		resolution:    "1080",
+		hwQuality:     "65",
 	}
 
 	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
@@ -299,12 +328,23 @@ func (vs *videoService) runProbe(path, entries string, extra ...string) (string,
 }
 
 func (vs *videoService) buildFFmpegCommand(inputPath, outputPath string) *exec.Cmd {
-	args := []string{
-		"-i", inputPath,
-		"-c:v", vs.config.codec, "-preset", vs.config.preset, "-crf", vs.config.crf,
-		"-vf", "scale=-2:'min(" + vs.config.resolution + ",ih)'",
-		"-c:a", "aac", "-b:a", vs.config.audioBitrate,
+	args := []string{"-i", inputPath}
+
+	if vs.config.hwAccel {
+		// VideoToolbox: hardware-accelerated, ignores -preset/-crf, uses -q:v (0-100, higher = better)
+		args = append(args, "-c:v", "h264_videotoolbox", "-q:v", vs.config.hwQuality)
+	} else {
+		args = append(args, "-c:v", vs.config.codec, "-preset", vs.config.preset, "-crf", vs.config.crf)
+		// Cap CPU threads per job so concurrent ffmpegs don't thrash. HW encoders
+		// don't benefit from this since they offload to the media engine.
+		args = append(args, "-threads", strconv.Itoa(autoThreadsPerJob(vs.config.maxConcurrent)))
 	}
+
+	args = append(args,
+		"-vf", "scale=-2:'min("+vs.config.resolution+",ih)'",
+		"-c:a", "aac", "-b:a", vs.config.audioBitrate,
+	)
+
 	// movflags is only valid for MP4/MOV containers
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(outputPath), "."))
 	if ext == "mp4" || ext == "mov" || ext == "m4v" {
@@ -1428,8 +1468,8 @@ func parseFlagValue(args []string, i int, name, hint string) (string, int) {
 	return args[i+1], 1
 }
 
-// parseArgs extracts the --format and --size flags and positional path from args in any order.
-func parseArgs(args []string) (format, size, path string) {
+// parseArgs extracts the --format, --size, --hw flags and positional path from args in any order.
+func parseArgs(args []string) (format, size, path string, hw bool) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		flagName := strings.SplitN(arg, "=", 2)[0]
@@ -1442,11 +1482,14 @@ func parseArgs(args []string) (format, size, path string) {
 			val, skip := parseFlagValue(args, i, "--size", "Supported sizes: sm, small, md, medium, lg, large")
 			size = val
 			i += skip
+		} else if arg == "--hw" || arg == "-hw" {
+			hw = true
 		} else if args[i] == "--help" || args[i] == "-h" {
 			fmt.Print("Usage: fideogo [options] [path|pattern]\n\n")
 			fmt.Print("Options:\n")
 			fmt.Print("  --format <fmt>   Output format: mp4, mov, mkv\n")
 			fmt.Print("  --size <size>    Target size: sm/small (540p), md/medium (1080p), lg/large (2160p)\n")
+			fmt.Print("  --hw             Use hardware encoder (h264_videotoolbox on macOS) — much faster\n")
 			fmt.Print("  --help, -h       Show this help message\n\n")
 			fmt.Print("Examples:\n")
 			fmt.Print("  fideogo                     Compress videos in current directory\n")
@@ -1455,6 +1498,7 @@ func parseArgs(args []string) (format, size, path string) {
 			fmt.Print("  fideogo '*.mov'              Compress matching files\n")
 			fmt.Print("  fideogo --format mkv .       Convert to MKV format\n")
 			fmt.Print("  fideogo --size sm video.mp4  Compress to 540p\n")
+			fmt.Print("  fideogo --hw video.mov       Use hardware encoder\n")
 			os.Exit(0)
 		} else if path != "" {
 			fmt.Fprintf(os.Stderr, "Error: unexpected argument %q (only one path allowed)\n", args[i])
@@ -1473,10 +1517,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	format, size, path := parseArgs(os.Args[1:])
+	format, size, path, hw := parseArgs(os.Args[1:])
 
 	if format != "" && !validFormats[format] {
 		fmt.Fprintf(os.Stderr, "Error: unsupported format %q\nSupported formats: mp4, mov, mkv\n", format)
+		os.Exit(1)
+	}
+
+	if hw && runtime.GOOS != "darwin" {
+		fmt.Fprintf(os.Stderr, "Error: --hw (h264_videotoolbox) is only supported on macOS\n")
 		os.Exit(1)
 	}
 
@@ -1507,6 +1556,17 @@ func main() {
 		m.config.resolution = resolution
 	}
 	m.config.outputFormat = format
+	m.config.hwAccel = hw
+	if hw {
+		// HW encoder offloads to media engine; we can run more jobs in parallel
+		// without CPU contention. Cap so we don't overwhelm I/O or the engine.
+		if c := runtime.NumCPU() / 2; c > m.config.maxConcurrent {
+			if c > 6 {
+				c = 6
+			}
+			m.config.maxConcurrent = c
+		}
+	}
 	m.videoService = newVideoService(m.config)
 
 	p := tea.NewProgram(m, tea.WithoutSignalHandler())
