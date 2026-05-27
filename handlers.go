@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -26,7 +28,9 @@ func (m model) fillSlots(skipIdx int, cmds []tea.Cmd) (model, []tea.Cmd) {
 			}
 			continue
 		}
-		cmds = append(cmds, m.processFile(i))
+		ctx, cancel := context.WithCancel(context.Background())
+		m.cancels[i] = cancel
+		cmds = append(cmds, m.processFile(i, ctx, cancel))
 	}
 	return m, cmds
 }
@@ -81,7 +85,9 @@ func (m model) handleOverwriteConfirm() (model, tea.Cmd) {
 	var cmds []tea.Cmd
 	if m.processingCount < m.config.maxConcurrent &&
 		m.files[confirmed].selected && m.files[confirmed].status == "" {
-		cmds = append(cmds, m.processFile(confirmed))
+		ctx, cancel := context.WithCancel(context.Background())
+		m.cancels[confirmed] = cancel
+		cmds = append(cmds, m.processFile(confirmed, ctx, cancel))
 	}
 
 	m, cmds = m.fillSlots(confirmed, cmds)

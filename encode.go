@@ -24,7 +24,9 @@ func newVideoService(config compressionConfig) *videoService {
 }
 
 // timeRegex extracts the microsecond timestamp from ffmpeg's -progress output.
-var timeRegex = regexp.MustCompile(`out_time_ms=(\d+)`)
+// Use out_time_us — ffmpeg's `out_time_ms` is a historical mislabel that also
+// carries microseconds, and could be corrected in a future version.
+var timeRegex = regexp.MustCompile(`out_time_us=(\d+)`)
 
 // getOutputPath returns the output path for a given input file.
 // If outputFormat is non-empty, the extension is replaced with the target format.
@@ -74,16 +76,18 @@ func (vs *videoService) buildFFmpegCommand(ctx context.Context, inputPath, outpu
 // processFile spawns a worker goroutine that probes the input, runs ffmpeg, and
 // streams progress/done/error/cancel messages back to the Bubble Tea program.
 // The worker holds no reference to the model — only the snapshotted path,
-// outputFormat, videoService, and cancel context.
-func (m *model) processFile(idx int) tea.Cmd {
+// outputFormat, videoService, and the caller-owned cancel context.
+//
+// processFile is a read-only value-receiver method: the caller is responsible
+// for creating the cancel context and registering it in m.cancels before
+// invocation. This keeps state mutation out of a Cmd-returning method.
+func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFunc) tea.Cmd {
 	if idx < 0 || idx >= len(m.files) {
+		cancel()
 		return func() tea.Msg {
 			return errorMsg{idx: idx, err: fmt.Errorf("invalid file index: %d", idx)}
 		}
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancels[idx] = cancel
 
 	path := m.files[idx].path
 	outputFormat := m.config.outputFormat
@@ -129,24 +133,26 @@ func (m *model) processFile(idx int) tea.Cmd {
 		progressDone := make(chan struct{})
 		go func() {
 			defer close(progressDone)
+			// Always drain stdout — leaving the pipe full would block ffmpeg.
+			// Without a known duration we can't compute a percentage, so we
+			// drain silently and let the spinner indicate activity rather
+			// than pinning a misleading static value.
 			scanner := bufio.NewScanner(stdout)
 			for scanner.Scan() {
-				line := scanner.Text()
-				matches := timeRegex.FindStringSubmatch(line)
+				if duration <= 0 {
+					continue
+				}
+				matches := timeRegex.FindStringSubmatch(scanner.Text())
 				if len(matches) <= 1 {
 					continue
 				}
-				timeMs, err := strconv.ParseInt(matches[1], 10, 64)
+				timeUs, err := strconv.ParseInt(matches[1], 10, 64)
 				if err != nil {
 					continue
 				}
-				timeSec := float64(timeMs) / 1000000
-				prog := 0.5
-				if duration > 0 {
-					prog = timeSec / duration
-					if prog > 1 {
-						prog = 1
-					}
+				prog := float64(timeUs) / 1_000_000 / duration
+				if prog > 1 {
+					prog = 1
 				}
 				program.Send(progressMsg{idx: idx, progress: prog})
 			}
@@ -167,12 +173,11 @@ func (m *model) processFile(idx int) tea.Cmd {
 		<-stderrDone
 
 		if waitErr != nil {
-			// Context cancellation = user cancel. Clean up partial output.
+			// Context cancellation = user cancel. Best-effort cleanup of the
+			// partial output; a cleanup failure must not be reported as a
+			// processing error, since the user explicitly asked to cancel.
 			if ctx.Err() != nil {
-				if removeErr := os.Remove(output); removeErr != nil && !os.IsNotExist(removeErr) {
-					program.Send(errorMsg{idx: idx, err: fmt.Errorf("cleanup failed: %w", removeErr)})
-					return
-				}
+				_ = os.Remove(output)
 				program.Send(cancelMsg{idx: idx})
 				return
 			}
