@@ -25,10 +25,13 @@ func (vs *videoService) probeMetadata(path string) (videoMetadata, error) {
 	if path == "" {
 		return videoMetadata{}, fmt.Errorf("path cannot be empty")
 	}
+	// Ask for duration on both the stream and the format: Matroska/WebM often
+	// leave format=duration as "N/A", in which case the per-stream value is the
+	// only one available. We take the first that parses (see the loop below).
 	args := []string{
 		"-v", "error",
 		"-select_streams", "v:0",
-		"-show_entries", "stream=codec_name,width,height:format=bit_rate,duration",
+		"-show_entries", "stream=codec_name,width,height,duration:format=bit_rate,duration",
 		"-of", "default=noprint_wrappers=1",
 		path,
 	}
@@ -54,7 +57,14 @@ func (vs *videoService) probeMetadata(path string) (videoMetadata, error) {
 		case "bit_rate":
 			meta.bitrate = val
 		case "duration":
-			meta.duration, _ = strconv.ParseFloat(val, 64)
+			// Both the stream and format sections emit a duration line; keep the
+			// first that parses to a positive value so a valid stream duration
+			// isn't clobbered by a later "N/A" from the format section.
+			if meta.duration == 0 {
+				if d, err := strconv.ParseFloat(val, 64); err == nil && d > 0 {
+					meta.duration = d
+				}
+			}
 		}
 	}
 	return meta, nil

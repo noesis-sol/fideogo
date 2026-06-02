@@ -25,9 +25,11 @@ func newVideoService(config compressionConfig) *videoService {
 }
 
 // timeRegex extracts the microsecond timestamp from ffmpeg's -progress output.
-// Use out_time_us — ffmpeg's `out_time_ms` is a historical mislabel that also
-// carries microseconds, and could be corrected in a future version.
-var timeRegex = regexp.MustCompile(`out_time_us=(\d+)`)
+// Modern ffmpeg emits out_time_us; older builds emit only out_time_ms, which —
+// despite its name — is a historical mislabel that also carries microseconds.
+// Matching either keeps the progress bar working on the older ffmpeg that many
+// Linux distros ship; both keys are interpreted as microseconds.
+var timeRegex = regexp.MustCompile(`out_time_(?:us|ms)=(\d+)`)
 
 // getOutputPath returns the output path for a given input file.
 // If outputFormat is non-empty, the extension is replaced with the target format.
@@ -100,6 +102,107 @@ func decodeArgs(meta videoMetadata) []string {
 	}
 }
 
+// hwEncoderCandidates lists the H.264 hardware encoders we try, per platform, in
+// preference order. VAAPI is intentionally omitted: it requires uploading frames
+// to the GPU (format=nv12,hwupload + scale_vaapi), which is incompatible with our
+// software scale filter and would need a separate filter pipeline.
+func hwEncoderCandidates() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"h264_videotoolbox"}
+	}
+	// NVIDIA, then Intel QuickSync, then AMD AMF.
+	return []string{"h264_nvenc", "h264_qsv", "h264_amf"}
+}
+
+// resolveHWEncoder picks a platform-appropriate hardware encoder. It first
+// narrows the candidates to those ffmpeg was compiled with, then prefers one
+// whose matching GPU device is actually present — so a build that bundles e.g.
+// h264_nvenc on a non-NVIDIA machine doesn't shadow the GPU that's really there.
+// If the device probe finds no match (or can't see device nodes, e.g. inside a
+// container), it falls back to the first compiled-in encoder and lets ffmpeg
+// surface any device error per file rather than guessing wrong here.
+func resolveHWEncoder() (string, error) {
+	candidates := hwEncoderCandidates()
+	out, err := exec.Command("ffmpeg", "-hide_banner", "-encoders").Output()
+	if err != nil {
+		return "", fmt.Errorf("could not query ffmpeg encoders: %w", err)
+	}
+	available := string(out)
+
+	var compiled []string
+	for _, enc := range candidates {
+		if strings.Contains(available, enc) {
+			compiled = append(compiled, enc)
+		}
+	}
+	if len(compiled) == 0 {
+		return "", fmt.Errorf("no hardware H.264 encoder available in this ffmpeg build (looked for: %s)", strings.Join(candidates, ", "))
+	}
+
+	for _, enc := range compiled {
+		if hwDeviceAvailable(enc) {
+			return enc, nil
+		}
+	}
+	return compiled[0], nil
+}
+
+// hwDeviceAvailable reports whether the GPU backing the given encoder is present.
+// Device nodes are only probeable on Linux; elsewhere (Windows, macOS) we can't
+// cheaply tell, so we assume available and rely on ffmpeg to error if not.
+func hwDeviceAvailable(encoder string) bool {
+	if runtime.GOOS != "linux" {
+		return true
+	}
+	switch encoder {
+	case "h264_nvenc":
+		// NVIDIA driver exposes /dev/nvidia0, /dev/nvidia1, …
+		matches, _ := filepath.Glob("/dev/nvidia[0-9]*")
+		return len(matches) > 0
+	case "h264_qsv":
+		return drmRenderVendorPresent("0x8086") // Intel
+	case "h264_amf":
+		return drmRenderVendorPresent("0x1002") // AMD
+	}
+	return true
+}
+
+// drmRenderVendorPresent reports whether any DRM render node (/dev/dri/renderD*)
+// is backed by a GPU with the given PCI vendor ID (read from sysfs). Used to tell
+// Intel (QSV) and AMD (AMF) render nodes apart, since the node path alone doesn't
+// identify the vendor.
+func drmRenderVendorPresent(vendorID string) bool {
+	nodes, _ := filepath.Glob("/dev/dri/renderD*")
+	for _, node := range nodes {
+		name := filepath.Base(node) // e.g. renderD128
+		data, err := os.ReadFile("/sys/class/drm/" + name + "/device/vendor")
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(string(data)), vendorID) {
+			return true
+		}
+	}
+	return false
+}
+
+// hwEncoderArgs returns the video-codec arguments for the resolved hardware
+// encoder. Each encoder exposes a different quality knob: VideoToolbox uses -q:v
+// (0-100, higher = better); NVENC/QSV/AMF use a CRF-like quantizer (0-51, lower =
+// better), for which we reuse the software CRF value.
+func hwEncoderArgs(c compressionConfig) []string {
+	switch c.hwEncoder {
+	case "h264_nvenc":
+		return []string{"-c:v", "h264_nvenc", "-cq", c.crf}
+	case "h264_qsv":
+		return []string{"-c:v", "h264_qsv", "-global_quality", c.crf}
+	case "h264_amf":
+		return []string{"-c:v", "h264_amf", "-rc", "cqp", "-qp_i", c.crf, "-qp_p", c.crf, "-qp_b", c.crf}
+	default: // h264_videotoolbox
+		return []string{"-c:v", "h264_videotoolbox", "-q:v", c.hwQuality}
+	}
+}
+
 // videoArgs returns the video-codec ffmpeg arguments for the target container.
 func (vs *videoService) videoArgs(container string) []string {
 	// WebM only accepts VP8/VP9/AV1 video, so H.264 (including the
@@ -112,8 +215,7 @@ func (vs *videoService) videoArgs(container string) []string {
 		}
 	}
 	if vs.config.hwAccel {
-		// VideoToolbox: hardware-accelerated, ignores -preset/-crf, uses -q:v (0-100, higher = better)
-		return []string{"-c:v", "h264_videotoolbox", "-q:v", vs.config.hwQuality}
+		return hwEncoderArgs(vs.config)
 	}
 	// Cap CPU threads per job so concurrent ffmpegs don't thrash. HW encoders
 	// don't benefit from this since they offload to the media engine.

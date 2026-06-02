@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -65,7 +64,7 @@ func parseArgs(args []string) (format, size, path string, hw bool) {
 			fmt.Print("Options:\n")
 			fmt.Print("  --format <fmt>   Output format: mp4, mov, mkv, webm (default: mp4)\n")
 			fmt.Print("  --size <size>    Target size: sm/small (540p), md/medium (1080p), lg/large (2160p)\n")
-			fmt.Print("  --hw             Use hardware encoder (h264_videotoolbox on macOS) — much faster\n")
+			fmt.Print("  --hw             Use hardware encoder (VideoToolbox/NVENC/QSV/AMF) — much faster\n")
 			fmt.Print("  --help, -h       Show this help message\n\n")
 			fmt.Print("Examples:\n")
 			fmt.Print("  fideogo                     Compress videos in current directory\n")
@@ -142,11 +141,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if hw && runtime.GOOS != "darwin" {
-		fmt.Fprintf(os.Stderr, "Error: --hw (h264_videotoolbox) is only supported on macOS\n")
-		os.Exit(1)
-	}
-
 	if hw && format == "webm" {
 		// h264_videotoolbox emits H.264, which a WebM container can't hold;
 		// WebM always goes through the software VP9 encoder instead.
@@ -183,13 +177,23 @@ func main() {
 	m.config.outputFormat = format
 	m.config.hwAccel = hw
 	if hw {
-		// HW encoder offloads to media engine; we can run more jobs in parallel
-		// without CPU contention. Cap so we don't overwhelm I/O or the engine.
-		if c := runtime.NumCPU() / 2; c > m.config.maxConcurrent {
-			if c > 6 {
-				c = 6
-			}
-			m.config.maxConcurrent = c
+		encoder, err := resolveHWEncoder()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		m.config.hwEncoder = encoder
+
+		// Hardware encoders offload to a small fixed number of dedicated engines
+		// (Apple Silicon: 1 on base/Pro, 2 on Max, 4 on Ultra; NVENC/QSV/AMF
+		// likewise cap concurrent sessions) — unrelated to CPU count.
+		// Oversubscribing just serializes at the driver while adding per-process
+		// memory and scheduling overhead, so we cap low. A little parallelism
+		// still overlaps each file's probe, audio encode, and I/O with another
+		// file's video encode.
+		const hwMaxConcurrent = 2
+		if hwMaxConcurrent > m.config.maxConcurrent {
+			m.config.maxConcurrent = hwMaxConcurrent
 		}
 	}
 	m.videoService = newVideoService(m.config)

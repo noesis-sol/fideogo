@@ -11,8 +11,9 @@ type compressionConfig struct {
 	audioBitrate  string
 	resolution    string
 	outputFormat  string // target container format (mp4, mov, mkv, webm)
-	hwAccel       bool   // use hardware encoder (h264_videotoolbox on macOS)
-	hwQuality     string // -q:v value for hardware encoder (0-100, higher = better)
+	hwAccel       bool   // use hardware encoder
+	hwEncoder     string // resolved hw encoder (h264_videotoolbox/nvenc/qsv/amf)
+	hwQuality     string // -q:v value for h264_videotoolbox (0-100, higher = better)
 }
 
 const outputPrefix = "out_"
