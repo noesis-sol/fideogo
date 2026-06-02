@@ -8,11 +8,12 @@ import (
 )
 
 var videoExtensions = map[string]bool{
-	".mp4": true,
-	".mov": true,
-	".avi": true,
-	".mkv": true,
-	".m4v": true,
+	".mp4":  true,
+	".mov":  true,
+	".avi":  true,
+	".mkv":  true,
+	".m4v":  true,
+	".webm": true,
 }
 
 type videoFile struct {

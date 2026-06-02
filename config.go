@@ -10,12 +10,18 @@ type compressionConfig struct {
 	crf           string
 	audioBitrate  string
 	resolution    string
-	outputFormat  string // target container format (mp4, mov, mkv)
+	outputFormat  string // target container format (mp4, mov, mkv, webm)
 	hwAccel       bool   // use hardware encoder (h264_videotoolbox on macOS)
 	hwQuality     string // -q:v value for hardware encoder (0-100, higher = better)
 }
 
 const outputPrefix = "out_"
+
+// defaultOutputFormat is the container used when --format is not given. We pick
+// mp4 (H.264/AAC) rather than mirroring the source container so inputs like
+// WebM aren't locked into the slow software VP9 encoder, and so --hw hardware
+// encoding is available by default. Override per-run with --format.
+const defaultOutputFormat = "mp4"
 
 // autoMaxConcurrent picks a sensible parallelism for software x264 encodes:
 // 1 job per ~4 cores, clamped to [2, 4]. Each ffmpeg job still gets a thread
@@ -44,9 +50,10 @@ func autoThreadsPerJob(maxConcurrent int) int {
 }
 
 var validFormats = map[string]bool{
-	"mp4": true,
-	"mov": true,
-	"mkv": true,
+	"mp4":  true,
+	"mov":  true,
+	"mkv":  true,
+	"webm": true,
 }
 
 var validSizes = map[string]string{

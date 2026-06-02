@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -46,31 +47,89 @@ func outputFileExists(inputPath, outputFormat string) bool {
 	return err == nil
 }
 
-func (vs *videoService) buildFFmpegCommand(ctx context.Context, inputPath, outputPath string) *exec.Cmd {
-	args := []string{"-i", inputPath}
+func (vs *videoService) buildFFmpegCommand(ctx context.Context, inputPath, outputPath string, meta videoMetadata) *exec.Cmd {
+	container := strings.ToLower(strings.TrimPrefix(filepath.Ext(outputPath), "."))
 
-	if vs.config.hwAccel {
-		// VideoToolbox: hardware-accelerated, ignores -preset/-crf, uses -q:v (0-100, higher = better)
-		args = append(args, "-c:v", "h264_videotoolbox", "-q:v", vs.config.hwQuality)
-	} else {
-		args = append(args, "-c:v", vs.config.codec, "-preset", vs.config.preset, "-crf", vs.config.crf)
-		// Cap CPU threads per job so concurrent ffmpegs don't thrash. HW encoders
-		// don't benefit from this since they offload to the media engine.
-		args = append(args, "-threads", strconv.Itoa(autoThreadsPerJob(vs.config.maxConcurrent)))
-	}
-
-	args = append(args,
-		"-vf", "scale=-2:'min("+vs.config.resolution+",ih)'",
-		"-c:a", "aac", "-b:a", vs.config.audioBitrate,
-	)
+	// Hardware-accelerated decode flags must precede -i to apply to the input.
+	args := decodeArgs(meta)
+	args = append(args, "-i", inputPath)
+	args = append(args, vs.videoArgs(container)...)
+	args = append(args, "-vf", "scale=-2:'min("+vs.config.resolution+",ih)'")
+	args = append(args, vs.audioArgs(container)...)
 
 	// movflags is only valid for MP4/MOV containers.
-	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(outputPath), "."))
-	if ext == "mp4" || ext == "mov" || ext == "m4v" {
+	if container == "mp4" || container == "mov" || container == "m4v" {
 		args = append(args, "-movflags", "+faststart")
 	}
 	args = append(args, "-progress", "pipe:1", "-loglevel", "error", "-y", outputPath)
 	return exec.CommandContext(ctx, "ffmpeg", args...)
+}
+
+// heavyDecodeCodecs are modern codecs whose software decode is CPU-expensive
+// enough that offloading to a hardware decoder is worthwhile. Lightweight
+// sources (e.g. H.264 at 1080p) decode cheaply, so we leave them on software
+// to avoid the setup cost and quirks of the hardware path.
+var heavyDecodeCodecs = map[string]bool{
+	"av1":  true,
+	"hevc": true,
+	"h265": true,
+	"vp9":  true,
+}
+
+// decodeArgs returns hardware-accelerated decode flags to place before -i.
+//
+// Added selectively in two senses: (1) only for heavy sources — 1440p+ or a
+// modern codec — where software decode actually dominates CPU time; and (2) the
+// accelerator is chosen per platform so the tool still builds and runs on any
+// POSIX system. macOS uses VideoToolbox; elsewhere we let ffmpeg auto-select an
+// available accelerator. Hardware decode is best-effort: if the device can't
+// decode this codec (or none exists), ffmpeg falls back to software on its own,
+// so this never turns a working encode into a failing one.
+func decodeArgs(meta videoMetadata) []string {
+	height, _ := strconv.Atoi(meta.height)
+	heavy := height >= 1440 || heavyDecodeCodecs[strings.ToLower(meta.codec)]
+	if !heavy {
+		return nil
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		return []string{"-hwaccel", "videotoolbox"}
+	default:
+		return []string{"-hwaccel", "auto"}
+	}
+}
+
+// videoArgs returns the video-codec ffmpeg arguments for the target container.
+func (vs *videoService) videoArgs(container string) []string {
+	// WebM only accepts VP8/VP9/AV1 video, so H.264 (including the
+	// h264_videotoolbox HW encoder) is invalid here — always use VP9.
+	// -b:v 0 puts libvpx-vp9 in constant-quality mode driven by -crf.
+	if container == "webm" {
+		return []string{
+			"-c:v", "libvpx-vp9", "-crf", vs.config.crf, "-b:v", "0", "-row-mt", "1",
+			"-threads", strconv.Itoa(autoThreadsPerJob(vs.config.maxConcurrent)),
+		}
+	}
+	if vs.config.hwAccel {
+		// VideoToolbox: hardware-accelerated, ignores -preset/-crf, uses -q:v (0-100, higher = better)
+		return []string{"-c:v", "h264_videotoolbox", "-q:v", vs.config.hwQuality}
+	}
+	// Cap CPU threads per job so concurrent ffmpegs don't thrash. HW encoders
+	// don't benefit from this since they offload to the media engine.
+	return []string{
+		"-c:v", vs.config.codec, "-preset", vs.config.preset, "-crf", vs.config.crf,
+		"-threads", strconv.Itoa(autoThreadsPerJob(vs.config.maxConcurrent)),
+	}
+}
+
+// audioArgs returns the audio-codec ffmpeg arguments for the target container.
+// WebM requires Vorbis/Opus rather than AAC.
+func (vs *videoService) audioArgs(container string) []string {
+	if container == "webm" {
+		return []string{"-c:a", "libopus", "-b:a", vs.config.audioBitrate}
+	}
+	return []string{"-c:a", "aac", "-b:a", vs.config.audioBitrate}
 }
 
 // processFile spawns a worker goroutine that probes the input, runs ffmpeg, and
@@ -108,7 +167,7 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 		output := getOutputPath(path, outputFormat)
 		duration := meta.duration
 
-		cmd := vs.buildFFmpegCommand(ctx, path, output)
+		cmd := vs.buildFFmpegCommand(ctx, path, output, meta)
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {

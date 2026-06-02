@@ -51,7 +51,7 @@ func parseArgs(args []string) (format, size, path string, hw bool) {
 		flagName := strings.SplitN(arg, "=", 2)[0]
 
 		if flagName == "--format" || flagName == "-format" {
-			val, skip := parseFlagValue(args, i, "--format", "Supported formats: mp4, mov, mkv")
+			val, skip := parseFlagValue(args, i, "--format", "Supported formats: mp4, mov, mkv, webm")
 			format = val
 			i += skip
 		} else if flagName == "--size" || flagName == "-size" {
@@ -63,7 +63,7 @@ func parseArgs(args []string) (format, size, path string, hw bool) {
 		} else if args[i] == "--help" || args[i] == "-h" {
 			fmt.Print("Usage: fideogo [options] [path|pattern]\n\n")
 			fmt.Print("Options:\n")
-			fmt.Print("  --format <fmt>   Output format: mp4, mov, mkv\n")
+			fmt.Print("  --format <fmt>   Output format: mp4, mov, mkv, webm (default: mp4)\n")
 			fmt.Print("  --size <size>    Target size: sm/small (540p), md/medium (1080p), lg/large (2160p)\n")
 			fmt.Print("  --hw             Use hardware encoder (h264_videotoolbox on macOS) — much faster\n")
 			fmt.Print("  --help, -h       Show this help message\n\n")
@@ -106,7 +106,7 @@ func createModelFromPath(targetPath string) (model, error) {
 
 	ext := strings.ToLower(filepath.Ext(targetPath))
 	if !videoExtensions[ext] {
-		return model{}, fmt.Errorf("%s is not a supported video file\nSupported extensions: .mp4, .mov, .avi, .mkv, .m4v", targetPath)
+		return model{}, fmt.Errorf("%s is not a supported video file\nSupported extensions: .mp4, .mov, .avi, .mkv, .m4v, .webm", targetPath)
 	}
 
 	absPath, err := filepath.Abs(targetPath)
@@ -131,13 +131,26 @@ func main() {
 
 	format, size, path, hw := parseArgs(os.Args[1:])
 
+	// Default to mp4 rather than preserving the source container, so a WebM
+	// (or any) input isn't forced through the slow software VP9 encoder.
+	if format == "" {
+		format = defaultOutputFormat
+	}
+
 	if format != "" && !validFormats[format] {
-		fmt.Fprintf(os.Stderr, "Error: unsupported format %q\nSupported formats: mp4, mov, mkv\n", format)
+		fmt.Fprintf(os.Stderr, "Error: unsupported format %q\nSupported formats: mp4, mov, mkv, webm\n", format)
 		os.Exit(1)
 	}
 
 	if hw && runtime.GOOS != "darwin" {
 		fmt.Fprintf(os.Stderr, "Error: --hw (h264_videotoolbox) is only supported on macOS\n")
+		os.Exit(1)
+	}
+
+	if hw && format == "webm" {
+		// h264_videotoolbox emits H.264, which a WebM container can't hold;
+		// WebM always goes through the software VP9 encoder instead.
+		fmt.Fprintf(os.Stderr, "Error: --hw is not compatible with --format webm (WebM requires VP9)\n")
 		os.Exit(1)
 	}
 
