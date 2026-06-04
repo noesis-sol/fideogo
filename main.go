@@ -77,6 +77,7 @@ func parseArgs(args []string) (format, size, path string, hw bool) {
 			os.Exit(0)
 		} else if path != "" {
 			fmt.Fprintf(os.Stderr, "Error: unexpected argument %q (only one path allowed)\n", args[i])
+			fmt.Fprint(os.Stderr, "Hint: if you used a wildcard, quote it so the shell doesn't expand it: fideogo '*.mov'\n")
 			os.Exit(1)
 		} else {
 			path = args[i]
@@ -86,7 +87,7 @@ func parseArgs(args []string) (format, size, path string, hw bool) {
 }
 
 func createModelFromPath(targetPath string) (model, error) {
-	if strings.Contains(targetPath, "*") {
+	if strings.ContainsAny(targetPath, "*?[") {
 		files, err := collectVideosFromPattern(targetPath)
 		if err != nil {
 			return model{}, err

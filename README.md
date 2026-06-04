@@ -66,9 +66,9 @@ fideogo /path/to/videos
 # Compress a specific video file
 fideogo video.mp4
 
-# Use wildcards to select multiple files
-fideogo *.mp4
-fideogo /path/to/videos/*.mov
+# Use wildcards to select multiple files (always quote the pattern)
+fideogo '*.mp4'
+fideogo '/path/to/videos/*.mov'
 
 # Convert to a specific format
 fideogo --format mkv video.mp4
@@ -77,6 +77,58 @@ fideogo /path/to/videos --format mov
 # Compress to a specific size
 fideogo --size sm video.mp4
 fideogo --size large /path/to/videos
+```
+
+### Wildcard Patterns
+
+Pass a glob pattern instead of a single path to select files across one or more
+folders. The following metacharacters are supported:
+
+| Pattern | Matches |
+|---------|---------|
+| `*` | Any sequence of characters within a single path segment (does **not** cross `/`) |
+| `?` | Any single character |
+| `[abc]` / `[a-z]` | One character from the set or range |
+
+> **Always quote your pattern** (`'...'`) so your shell passes it to fideogo
+> literally instead of expanding it first. fideogo accepts a single path/pattern
+> argument — an unquoted glob that your shell expands into several filenames will
+> be rejected with `only one path allowed`.
+
+```bash
+# Every .mov in the current directory
+fideogo '*.mov'
+
+# Files like clip1.mp4, clip2.mp4, clipX.mp4 (single-character wildcard)
+fideogo 'clip?.mp4'
+
+# Files starting with a, b, or c
+fideogo '[abc]*.mp4'
+```
+
+#### Finding the same file across subfolders
+
+Glob matching is **not recursive** (there is no `**`), so you match one directory
+level per `*/`. To compress a file that has the same name inside every subfolder
+of a parent directory, put a `*` where the subfolder name goes:
+
+```bash
+# 'intro.mp4' inside every immediate subfolder of ./courses
+#   courses/python/intro.mp4
+#   courses/golang/intro.mp4
+#   courses/rust/intro.mp4
+fideogo 'courses/*/intro.mp4'
+
+# One level deeper (e.g. courses/python/week1/intro.mp4)
+fideogo 'courses/*/*/intro.mp4'
+```
+
+You can also point a wildcard at the subfolders themselves — each matched
+directory is scanned (non-recursively) for supported videos:
+
+```bash
+# Compress every video sitting directly inside each subfolder of ./courses
+fideogo 'courses/*'
 ```
 
 ### Output Size
