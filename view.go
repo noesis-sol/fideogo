@@ -70,7 +70,7 @@ func getProgressColor(progress float64) lipgloss.Color {
 func (m model) View() string {
 	var s strings.Builder
 
-	s.WriteString(titleStyle.Render("🎬 Video Compressor"))
+	s.WriteString(titleStyle.Render("🎬 FideoGo Video Compressor"))
 	s.WriteString("\n")
 
 	if m.processing {
