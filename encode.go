@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -399,6 +400,52 @@ func opusAudio(c compressionConfig) []string {
 	return []string{"-c:a", "libopus", "-b:a", c.audioBitrate}
 }
 
+// streamProgress reads ffmpeg's -progress stream on stdout and forwards percent
+// updates for file idx. It coalesces to at most one message per whole percent:
+// ffmpeg emits progress blocks many times a second, the UI only shows an integer
+// percent over a 40-cell bar, and every forwarded message rebuilds the whole
+// View across all concurrent files. stdout is drained even when duration is
+// unknown (a full pipe would block ffmpeg); without a duration no percent can be
+// computed, so the spinner conveys activity instead.
+func streamProgress(stdout io.Reader, idx int, duration float64) {
+	scanner := bufio.NewScanner(stdout)
+	lastPct := -1
+	for scanner.Scan() {
+		if duration <= 0 {
+			continue
+		}
+		matches := timeRegex.FindStringSubmatch(scanner.Text())
+		if len(matches) <= 1 {
+			continue
+		}
+		timeUs, err := strconv.ParseInt(matches[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		prog := float64(timeUs) / 1_000_000 / duration
+		if prog > 1 {
+			prog = 1
+		}
+		pct := int(prog * 100)
+		if pct == lastPct {
+			continue
+		}
+		lastPct = pct
+		program.Send(progressMsg{idx: idx, progress: prog})
+	}
+}
+
+// drainStderr accumulates ffmpeg's stderr into buf so a failed encode can report
+// the underlying error; draining also keeps the pipe from filling and blocking
+// ffmpeg.
+func drainStderr(stderr io.Reader, buf *strings.Builder) {
+	sc := bufio.NewScanner(stderr)
+	for sc.Scan() {
+		buf.WriteString(sc.Text())
+		buf.WriteString("\n")
+	}
+}
+
 // processFile spawns a worker goroutine that probes the input, runs ffmpeg, and
 // streams progress/done/error/cancel messages back to the Bubble Tea program.
 // The worker holds no reference to the model — only the snapshotted path,
@@ -462,39 +509,13 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 		progressDone := make(chan struct{})
 		go func() {
 			defer close(progressDone)
-			// Always drain stdout — leaving the pipe full would block ffmpeg.
-			// Without a known duration we can't compute a percentage, so we
-			// drain silently and let the spinner indicate activity rather
-			// than pinning a misleading static value.
-			scanner := bufio.NewScanner(stdout)
-			for scanner.Scan() {
-				if duration <= 0 {
-					continue
-				}
-				matches := timeRegex.FindStringSubmatch(scanner.Text())
-				if len(matches) <= 1 {
-					continue
-				}
-				timeUs, err := strconv.ParseInt(matches[1], 10, 64)
-				if err != nil {
-					continue
-				}
-				prog := float64(timeUs) / 1_000_000 / duration
-				if prog > 1 {
-					prog = 1
-				}
-				program.Send(progressMsg{idx: idx, progress: prog})
-			}
+			streamProgress(stdout, idx, duration)
 		}()
 
 		stderrDone := make(chan struct{})
 		go func() {
 			defer close(stderrDone)
-			sc := bufio.NewScanner(stderr)
-			for sc.Scan() {
-				stderrBuf.WriteString(sc.Text())
-				stderrBuf.WriteString("\n")
-			}
+			drainStderr(stderr, &stderrBuf)
 		}()
 
 		waitErr := cmd.Wait()

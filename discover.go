@@ -16,11 +16,22 @@ var videoExtensions = map[string]bool{
 	".webm": true,
 }
 
+// fileStatus is a file's lifecycle state within a batch. statusPending is the
+// zero value, so a freshly discovered videoFile starts unprocessed.
+type fileStatus int
+
+const (
+	statusPending    fileStatus = iota // not yet started
+	statusProcessing                   // ffmpeg running
+	statusDone                         // finished successfully
+	statusError                        // failed
+)
+
 type videoFile struct {
 	path     string
 	name     string
 	selected bool
-	status   string // "", "processing", "done", "error"
+	status   fileStatus // lifecycle state (statusPending is the zero value)
 	progress float64
 	info     string
 	outInfo  string

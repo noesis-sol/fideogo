@@ -57,11 +57,11 @@ func TestFFmpegArgs(t *testing.T) {
 	hwConfig.hwEncoder = "h264_videotoolbox"
 
 	tests := []struct {
-		name    string
-		config  compressionConfig
-		out     string
-		want    [][]string // contiguous sequences that must be present
-		absent  []string   // tokens that must NOT be present
+		name   string
+		config compressionConfig
+		out    string
+		want   [][]string // contiguous sequences that must be present
+		absent []string   // tokens that must NOT be present
 	}{
 		{
 			name:   "mp4 software h264/aac with faststart",

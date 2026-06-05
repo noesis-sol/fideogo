@@ -3,10 +3,22 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
+)
+
+// Row glyphs and the detail-line indent, named so the View helpers read clearly.
+const (
+	cursorActive     = "▸ "
+	cursorInactive   = "  "
+	markerSelected   = "●"
+	markerUnselected = "○"
+	doneMark         = " ✓"
+	errorMark        = " ✗"
+	detailIndent     = "    " // leading pad for In:/Out:/Error: detail lines
 )
 
 var (
@@ -67,23 +79,30 @@ func getProgressColor(progress float64) lipgloss.Color {
 	return lipgloss.Color(interpolated.Hex())
 }
 
+// percentStyles and percentLabels precompute the gradient-colored percentage
+// readout for every whole percent (0–100). The progress display only ever shows
+// an integer percent, so the hot render path indexes these tables instead of
+// blending a color, formatting a string, and allocating a fresh lipgloss.Style
+// on every frame for every in-flight file.
+var percentStyles, percentLabels = buildPercentTables()
+
+func buildPercentTables() ([101]lipgloss.Style, [101]string) {
+	var styles [101]lipgloss.Style
+	var labels [101]string
+	for p := 0; p <= 100; p++ {
+		styles[p] = lipgloss.NewStyle().Foreground(getProgressColor(float64(p) / 100))
+		labels[p] = strconv.Itoa(p) + "%"
+	}
+	return styles, labels
+}
+
 func (m model) View() string {
 	var s strings.Builder
 
 	s.WriteString(titleStyle.Render("🎬 FideoGo Video Compressor"))
 	s.WriteString("\n")
 
-	if m.processing {
-		completed := 0
-		for _, f := range m.files {
-			if f.status == "done" {
-				completed++
-			}
-		}
-		statusLine := fmt.Sprintf("Processing %d of %d files (%d completed)",
-			m.processingCount, m.totalToProcess, completed)
-		s.WriteString(infoStyle.Render(statusLine))
-	}
+	m.renderStatusHeader(&s)
 	s.WriteString("\n")
 
 	if len(m.files) == 0 {
@@ -94,120 +113,156 @@ func (m model) View() string {
 	}
 
 	for i, f := range m.files {
-		cursor := "  "
-		if i == m.cursor && !m.processing {
-			cursor = "▸ "
-		}
-
-		marker := "○"
-		markerStyle := dimStyle
-		if f.selected {
-			marker = "●"
-			markerStyle = normalStyle
-		}
-
-		// Differentiate in-progress vs waiting while a batch is running.
-		useSpinner := false
-		if m.processing && f.selected {
-			switch f.status {
-			case "processing":
-				useSpinner = true
-			case "":
-				marker = "○"
-				markerStyle = dimStyle
-			}
-		}
-
-		style := normalStyle
-		if i == m.cursor && !m.processing {
-			style = selectedStyle
-		}
-
-		s.WriteString(style.Render(cursor))
-		if useSpinner {
-			s.WriteString(m.spinner.View())
-		} else {
-			s.WriteString(markerStyle.Render(marker))
-		}
-		s.WriteString(style.Render(" " + f.name))
-
-		if f.status == "processing" {
-			s.WriteString("\n")
-			s.WriteString("    ")
-			s.WriteString(m.progressBar.ViewAs(f.progress))
-			s.WriteString(" ")
-			percentColor := getProgressColor(f.progress)
-			s.WriteString(lipgloss.NewStyle().Foreground(percentColor).Render(fmt.Sprintf("%.0f%%", f.progress*100)))
-			if f.info != "" {
-				s.WriteString("\n    ")
-				s.WriteString(infoStyle.Render("In:  " + f.info))
-			}
-		} else if f.status == "done" {
-			s.WriteString(successStyle.Render(" ✓"))
-			if f.info != "" {
-				s.WriteString("\n    ")
-				s.WriteString(normalStyle.Render("In:  " + f.info))
-			}
-			if f.outInfo != "" {
-				s.WriteString("\n    ")
-				s.WriteString(successStyle.Render("Out: " + f.outInfo))
-			}
-		} else if f.status == "error" {
-			s.WriteString(errorStyle.Render(" ✗"))
-			if f.err != nil {
-				s.WriteString("\n    ")
-				s.WriteString(errorStyle.Render("Error: " + f.err.Error()))
-			}
-		}
-
-		s.WriteString("\n")
+		m.renderFileRow(&s, i, f)
 	}
 
 	s.WriteString("\n")
-	if m.done {
-		doneMsg := helpTextStyle.Render("All done! Press ") + keyStyle.Render("q") + helpTextStyle.Render(" to quit.")
-		s.WriteString(doneMsg)
-	} else if m.processing {
-		s.WriteString(dimStyle.Render("Processing... (") + keyStyle.Render("c") + dimStyle.Render(" or ") + keyStyle.Render("ctrl+c") + dimStyle.Render(" to cancel)"))
-	} else {
-		help := keyStyle.Render("↑/↓") + helpTextStyle.Render(" navigate • ") +
-			keyStyle.Render("space") + helpTextStyle.Render(" select • ") +
-			keyStyle.Render("a") + helpTextStyle.Render(" all • ") +
-			keyStyle.Render("enter") + helpTextStyle.Render(" start • ") +
-			keyStyle.Render("q") + helpTextStyle.Render(" quit")
-		s.WriteString(help)
-	}
+	m.renderFooter(&s)
 
 	if m.showOverwritePrompt {
-		s.WriteString("\n\n")
-		var dialog strings.Builder
-
-		dialog.WriteString(dialogTitleStyle.Render("⚠️  File Already Exists"))
-		dialog.WriteString("\n")
-		dialog.WriteString(normalStyle.Render("The output file already exists:"))
-		dialog.WriteString("\n")
-		dialog.WriteString(infoStyle.Render(filepath.Base(m.pendingOutputFile)))
-		dialog.WriteString("\n")
-		dialog.WriteString(helpTextStyle.Render("What would you like to do?"))
-		dialog.WriteString("\n")
-
-		options := []string{"Overwrite existing file", "Skip this file", "Cancel all"}
-		for i, opt := range options {
-			cursor := "  "
-			style := dialogOptionStyle
-			if i == m.overwriteCursor {
-				cursor = "▸ "
-				style = dialogOptionSelectedStyle
-			}
-			dialog.WriteString(style.Render(cursor + opt))
-			dialog.WriteString("\n")
-		}
-
-		dialog.WriteString("\n")
-		dialog.WriteString(helpTextStyle.Render(keyStyle.Render("↑/↓") + " navigate • " + keyStyle.Render("enter") + " select"))
-
-		s.WriteString(dialogBoxStyle.Render(dialog.String()))
+		m.renderOverwriteDialog(&s)
 	}
 
 	return s.String()
+}
+
+// renderStatusHeader writes the "Processing X of Y" summary while a batch runs.
+func (m model) renderStatusHeader(s *strings.Builder) {
+	if !m.processing {
+		return
+	}
+	statusLine := fmt.Sprintf("Processing %d of %d files (%d completed)",
+		m.processingCount, m.totalToProcess, m.completedCount)
+	s.WriteString(infoStyle.Render(statusLine))
+}
+
+// fileGlyph picks a row's leading indicator. While a batch runs, a selected file
+// shows the spinner if it's encoding and a dim hollow circle if it's still
+// waiting its turn; otherwise the glyph just reflects selection (filled when
+// selected, dim hollow when not). When spin is true, glyph and style are unused.
+func (m model) fileGlyph(f videoFile) (glyph string, style lipgloss.Style, spin bool) {
+	if m.processing && f.selected {
+		switch f.status {
+		case statusProcessing:
+			return markerUnselected, dimStyle, true
+		case statusPending:
+			return markerUnselected, dimStyle, false
+		}
+	}
+	if f.selected {
+		return markerSelected, normalStyle, false
+	}
+	return markerUnselected, dimStyle, false
+}
+
+// renderFileRow writes one file's line: cursor, status glyph/spinner, name, and
+// the status-specific detail beneath it (progress, input/output info, or error).
+func (m model) renderFileRow(s *strings.Builder, i int, f videoFile) {
+	cursor := cursorInactive
+	rowStyle := normalStyle
+	if i == m.cursor && !m.processing {
+		cursor = cursorActive
+		rowStyle = selectedStyle
+	}
+
+	glyph, glyphStyle, spin := m.fileGlyph(f)
+	s.WriteString(rowStyle.Render(cursor))
+	if spin {
+		s.WriteString(m.spinner.View())
+	} else {
+		s.WriteString(glyphStyle.Render(glyph))
+	}
+	s.WriteString(rowStyle.Render(" " + f.name))
+
+	switch f.status {
+	case statusProcessing:
+		m.renderProgress(s, f)
+	case statusDone:
+		s.WriteString(successStyle.Render(doneMark))
+		if f.info != "" {
+			s.WriteString("\n" + detailIndent)
+			s.WriteString(normalStyle.Render("In:  " + f.info))
+		}
+		if f.outInfo != "" {
+			s.WriteString("\n" + detailIndent)
+			s.WriteString(successStyle.Render("Out: " + f.outInfo))
+		}
+	case statusError:
+		s.WriteString(errorStyle.Render(errorMark))
+		if f.err != nil {
+			s.WriteString("\n" + detailIndent)
+			s.WriteString(errorStyle.Render("Error: " + f.err.Error()))
+		}
+	}
+
+	s.WriteString("\n")
+}
+
+// renderProgress writes the progress bar, gradient percentage, and input info
+// for a file that is currently encoding.
+func (m model) renderProgress(s *strings.Builder, f videoFile) {
+	s.WriteString("\n" + detailIndent)
+	s.WriteString(m.progressBar.ViewAs(f.progress))
+	s.WriteString(" ")
+
+	pct := int(f.progress*100 + 0.5)
+	if pct < 0 {
+		pct = 0
+	} else if pct > 100 {
+		pct = 100
+	}
+	s.WriteString(percentStyles[pct].Render(percentLabels[pct]))
+
+	if f.info != "" {
+		s.WriteString("\n" + detailIndent)
+		s.WriteString(infoStyle.Render("In:  " + f.info))
+	}
+}
+
+// renderFooter writes the contextual help/status line at the bottom of the view.
+func (m model) renderFooter(s *strings.Builder) {
+	switch {
+	case m.done:
+		s.WriteString(helpTextStyle.Render("All done! Press ") + keyStyle.Render("q") + helpTextStyle.Render(" to quit."))
+	case m.processing:
+		s.WriteString(dimStyle.Render("Processing... (") + keyStyle.Render("c") + dimStyle.Render(" or ") + keyStyle.Render("ctrl+c") + dimStyle.Render(" to cancel)"))
+	default:
+		s.WriteString(keyStyle.Render("↑/↓") + helpTextStyle.Render(" navigate • ") +
+			keyStyle.Render("space") + helpTextStyle.Render(" select • ") +
+			keyStyle.Render("a") + helpTextStyle.Render(" all • ") +
+			keyStyle.Render("enter") + helpTextStyle.Render(" start • ") +
+			keyStyle.Render("q") + helpTextStyle.Render(" quit"))
+	}
+}
+
+// renderOverwriteDialog writes the modal shown when an output file already exists.
+func (m model) renderOverwriteDialog(s *strings.Builder) {
+	s.WriteString("\n\n")
+	var dialog strings.Builder
+
+	dialog.WriteString(dialogTitleStyle.Render("⚠️  File Already Exists"))
+	dialog.WriteString("\n")
+	dialog.WriteString(normalStyle.Render("The output file already exists:"))
+	dialog.WriteString("\n")
+	dialog.WriteString(infoStyle.Render(filepath.Base(m.pendingOutputFile)))
+	dialog.WriteString("\n")
+	dialog.WriteString(helpTextStyle.Render("What would you like to do?"))
+	dialog.WriteString("\n")
+
+	options := []string{"Overwrite existing file", "Skip this file", "Cancel all"}
+	for i, opt := range options {
+		cursor := cursorInactive
+		style := dialogOptionStyle
+		if i == m.overwriteCursor {
+			cursor = cursorActive
+			style = dialogOptionSelectedStyle
+		}
+		dialog.WriteString(style.Render(cursor + opt))
+		dialog.WriteString("\n")
+	}
+
+	dialog.WriteString("\n")
+	dialog.WriteString(helpTextStyle.Render(keyStyle.Render("↑/↓") + " navigate • " + keyStyle.Render("enter") + " select"))
+
+	s.WriteString(dialogBoxStyle.Render(dialog.String()))
 }

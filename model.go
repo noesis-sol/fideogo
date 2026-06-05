@@ -10,23 +10,31 @@ import (
 )
 
 type model struct {
-	files               []videoFile
-	cursor              int
-	processing          bool
-	currentIdx          int
-	progressBar         progress.Model
-	spinner             spinner.Model
-	done                bool
-	err                 error
-	cancels             map[int]context.CancelFunc
+	// File list and cursor selection.
+	files  []videoFile
+	cursor int
+
+	// Batch progress.
+	processing      bool
+	processingCount int // encodes currently in flight
+	totalToProcess  int // files queued for this batch
+	completedCount  int // files finished successfully (drives the header count)
+	done            bool
+	userCancelled   bool
+
+	// Overwrite modal state.
 	showOverwritePrompt bool
 	overwriteCursor     int
 	pendingOutputFile   string
-	config              compressionConfig
-	videoService        *videoService
-	processingCount     int
-	totalToProcess      int
-	userCancelled       bool
+	currentIdx          int // file awaiting the overwrite decision
+
+	// Shared components and configuration.
+	progressBar  progress.Model
+	spinner      spinner.Model
+	cancels      map[int]context.CancelFunc
+	config       compressionConfig
+	videoService *videoService
+	err          error
 }
 
 type progressMsg struct {

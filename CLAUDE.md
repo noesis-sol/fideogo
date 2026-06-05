@@ -2,7 +2,7 @@
 
 ## Project Description
 
-Fideogo is a terminal user interface (TUI) application for compressing video files using ffmpeg. It provides an interactive interface for selecting videos in the current directory and compressing them with optimized settings (H.264, 1080p, reduced bitrate).
+Fideogo is a terminal user interface (TUI) application for compressing video files using ffmpeg. It provides an interactive interface for selecting videos — from the current directory, explicit paths, or shell globs — and compressing them with sensible defaults (H.264, 1080p, CRF 28), plus optional format, size, and hardware-encoder overrides.
 
 ## Language
 
@@ -31,6 +31,10 @@ Fideogo is a terminal user interface (TUI) application for compressing video fil
 - Video metadata display (resolution, codec, bitrate)
 - Cancel rendering mid-process (press 'c' or ctrl+c)
 - Auto-compression with optimized ffmpeg settings
+- Batch compression of multiple files with bounded concurrency
+- Output format conversion (mp4/mov/mkv/webm) and size presets (`--size`)
+- Optional hardware-accelerated encoding (`--hw`: VideoToolbox/NVENC/QSV/AMF)
+- Overwrite prompt (overwrite / skip / cancel) with collision-safe output naming
 
 ## IMPORTANT: Build & Deploy Instructions for AI Agents
 
@@ -69,12 +73,12 @@ The user expects the binary to be updated after every code change. Do not ask pe
 fideogo/
 ├── main.go          # Entry point: CLI parsing, dep check, program bootstrap
 ├── config.go        # compressionConfig, defaults, autoMaxConcurrent, validators
-├── discover.go      # videoFile, findVideos, collectVideosFromPattern
+├── discover.go      # videoFile + fileStatus enum, findVideos, collectVideosFromPattern
 ├── probe.go         # videoMetadata + ffprobe (single-call) + formatVideoInfo
-├── encode.go        # videoService, buildFFmpegCommand, processFile worker
+├── encode.go        # videoService, buildFFmpegCommand, processFile worker, streamProgress/drainStderr
 ├── model.go         # Bubble Tea model, msg types, Init, Update dispatch
-├── handlers.go      # handleX methods + fillSlots slot-filling state machine
-├── view.go          # View() + lipgloss styles + progress gradient
+├── handlers.go      # handleX methods, fillSlots state machine, batchSettled predicate
+├── view.go          # View() + renderX helpers, lipgloss styles, gradient + precomputed percent tables
 ├── errorui.go       # Missing-ffmpeg installation help dialog
 ├── go.mod           # Go module dependencies
 ├── go.sum           # Dependency checksums
@@ -83,13 +87,42 @@ fideogo/
 
 ## ffmpeg Settings Used
 
-The application compresses videos with these settings:
-- Codec: H.264 (libx264)
-- Preset: slow (better compression)
-- CRF: 28 (quality level)
-- Resolution: Scaled to 1080p height
-- Audio: AAC at 96k bitrate
-- Output: Prefixed with `out_` in the same directory
+Defaults below; most are overridable via CLI flags (run with `--help`). The values
+live in `defaultConfig` (config.go) and are assembled into ffmpeg arguments in
+encode.go (`ffmpegArgs` / `profileFor`).
+
+- Container: `mp4` (`--format mp4|mov|mkv|webm`)
+- Video: H.264 / libx264, `-preset medium`, `-crf 28`
+  - `--hw` substitutes a hardware H.264 encoder (VideoToolbox / NVENC / QSV / AMF)
+    when one initializes successfully, falling back to software otherwise
+  - `webm` output uses libvpx-vp9 (`-crf 28 -b:v 0`) since the container can't carry H.264
+- Resolution: scaled to 1080p height and never upscaled (`scale=-2:'min(1080,ih)'`);
+  `--size sm|md|lg` selects 540 / 1080 / 2160
+- Audio: AAC at 96k (Opus at 96k for webm)
+- Concurrency: software encodes are thread-capped per job so parallel jobs don't
+  thrash; hardware runs cap at 2 concurrent jobs
+- Output: written next to the source with an `out_` prefix, with collision-safe
+  naming within a batch
+
+## Rendering & Performance Notes
+
+Bubble Tea calls `model.View()` after *every* message; the terminal write is
+separately throttled to ~60fps and skipped when the frame is unchanged. Two rules
+follow from that and are easy to regress:
+
+- **Keep `View()` cheap.** It is split into `renderX` helpers, and the per-frame
+  percentage readout indexes the precomputed `percentStyles` / `percentLabels`
+  tables (one entry per whole percent) instead of blending a gradient color and
+  allocating a `lipgloss.Style` on every frame. Don't move color math or style
+  allocation back into the render path.
+- **Coalesce progress at the source.** `streamProgress` (encode.go) forwards at
+  most one `progressMsg` per whole percent. ffmpeg prints progress blocks many
+  times a second, and every forwarded message rebuilds the entire View across all
+  concurrent files — so gate on the displayed granularity, not raw ffmpeg output.
+
+Per-file lifecycle state is the typed `fileStatus` enum (`statusPending` /
+`statusProcessing` / `statusDone` / `statusError`), not strings; `statusPending`
+is the zero value, so a freshly discovered file is unprocessed by default.
 
 ## Go Design Patterns
 

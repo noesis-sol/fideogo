@@ -14,7 +14,7 @@ import (
 // just-confirmed overwrite) so the capacity check stays accurate.
 func (m model) fillSlots(skipIdx int, cmds []tea.Cmd) (model, []tea.Cmd) {
 	for i := range m.files {
-		if i == skipIdx || !m.files[i].selected || m.files[i].status != "" {
+		if i == skipIdx || !m.files[i].selected || m.files[i].status != statusPending {
 			continue
 		}
 		if m.processingCount+len(cmds) >= m.config.maxConcurrent {
@@ -61,11 +61,20 @@ func (m model) tryStartNextFile() (model, tea.Cmd) {
 
 func (m model) hasUnstartedFiles() bool {
 	for _, f := range m.files {
-		if f.selected && f.status == "" {
+		if f.selected && f.status == statusPending {
 			return true
 		}
 	}
 	return false
+}
+
+// batchSettled reports that no encode is in flight and there's nothing left to
+// start — either the queue drained or the user cancelled. The terminal-state
+// handlers (done/error/cancel) share it to decide when to leave the processing
+// state.
+func (m model) batchSettled() bool {
+	return m.processingCount == 0 &&
+		(m.userCancelled || (!m.showOverwritePrompt && !m.hasUnstartedFiles()))
 }
 
 func (m *model) startProcessing() tea.Cmd {
@@ -73,7 +82,7 @@ func (m *model) startProcessing() tea.Cmd {
 
 	m.totalToProcess = 0
 	for _, f := range m.files {
-		if f.selected && f.status == "" {
+		if f.selected && f.status == statusPending {
 			m.totalToProcess++
 		}
 	}
@@ -96,7 +105,7 @@ func (m model) handleOverwriteConfirm() (model, tea.Cmd) {
 	confirmed := m.currentIdx
 	var cmds []tea.Cmd
 	if m.processingCount < m.config.maxConcurrent &&
-		m.files[confirmed].selected && m.files[confirmed].status == "" {
+		m.files[confirmed].selected && m.files[confirmed].status == statusPending {
 		ctx, cancel := context.WithCancel(context.Background())
 		m.cancels[confirmed] = cancel
 		cmds = append(cmds, m.processFile(confirmed, ctx, cancel))
@@ -138,7 +147,7 @@ func (m model) handleProcessingStart(msg processingStartMsg) (model, tea.Cmd) {
 			cancel()
 			delete(m.cancels, msg.idx)
 		}
-		m.files[msg.idx].status = ""
+		m.files[msg.idx].status = statusPending
 		m.files[msg.idx].progress = 0
 		m.files[msg.idx].outPath = "" // unstarted again; recompute next batch
 		if m.processingCount == 0 {
@@ -148,7 +157,7 @@ func (m model) handleProcessingStart(msg processingStartMsg) (model, tea.Cmd) {
 	}
 
 	wasIdle := m.processingCount == 0
-	m.files[msg.idx].status = "processing"
+	m.files[msg.idx].status = statusProcessing
 	m.processingCount++
 
 	// Start the spinner tick loop on 0→1 transition; subsequent ticks
@@ -175,8 +184,9 @@ func (m model) handleOutputInfo(msg outputInfoMsg) (model, tea.Cmd) {
 }
 
 func (m model) handleDone(msg doneMsg) (model, tea.Cmd) {
-	m.files[msg.idx].status = "done"
+	m.files[msg.idx].status = statusDone
 	m.files[msg.idx].progress = 1.0
+	m.completedCount++
 	delete(m.cancels, msg.idx)
 	if m.processingCount > 0 {
 		m.processingCount--
@@ -187,7 +197,7 @@ func (m model) handleDone(msg doneMsg) (model, tea.Cmd) {
 		return m, cmd
 	}
 
-	if m.processingCount == 0 && (m.userCancelled || (!m.showOverwritePrompt && !m.hasUnstartedFiles())) {
+	if m.batchSettled() {
 		m.processing = false
 		if !m.userCancelled {
 			m.done = true
@@ -197,9 +207,9 @@ func (m model) handleDone(msg doneMsg) (model, tea.Cmd) {
 }
 
 func (m model) handleError(msg errorMsg) (model, tea.Cmd) {
-	wasProcessing := m.files[msg.idx].status == "processing"
+	wasProcessing := m.files[msg.idx].status == statusProcessing
 
-	m.files[msg.idx].status = "error"
+	m.files[msg.idx].status = statusError
 	m.files[msg.idx].err = msg.err
 	m.err = msg.err
 	m.files[msg.idx].outPath = "" // release the claim; this file produced no result
@@ -214,7 +224,7 @@ func (m model) handleError(msg errorMsg) (model, tea.Cmd) {
 		return m, cmd
 	}
 
-	if m.processingCount == 0 && (m.userCancelled || (!m.showOverwritePrompt && !m.hasUnstartedFiles())) {
+	if m.batchSettled() {
 		m.processing = false
 	}
 	return m, nil
@@ -224,9 +234,9 @@ func (m model) handleCancel(msg cancelMsg) (model, tea.Cmd) {
 	// Only decrement if this file was actually marked processing — otherwise we
 	// could steal a slot from another file (e.g. cancel arriving for a file
 	// whose processingStartMsg was discarded under userCancelled).
-	wasProcessing := m.files[msg.idx].status == "processing"
+	wasProcessing := m.files[msg.idx].status == statusProcessing
 
-	m.files[msg.idx].status = ""
+	m.files[msg.idx].status = statusPending
 	m.files[msg.idx].progress = 0
 	m.files[msg.idx].err = nil
 	m.files[msg.idx].outPath = "" // unstarted again; recompute fresh next batch
@@ -235,57 +245,16 @@ func (m model) handleCancel(msg cancelMsg) (model, tea.Cmd) {
 		m.processingCount--
 	}
 
-	if m.processingCount == 0 && (m.userCancelled || (!m.showOverwritePrompt && !m.hasUnstartedFiles())) {
+	if m.batchSettled() {
 		m.processing = false
 	}
 	return m, nil
 }
 
 func (m model) handleKeyPress(msg tea.KeyMsg) (model, tea.Cmd) {
-	// Handle overwrite prompt first.
+	// The overwrite prompt is modal — it owns all input while shown.
 	if m.showOverwritePrompt {
-		switch msg.String() {
-		case "ctrl+c":
-			return m, tea.Quit
-		case "up", "k":
-			if m.overwriteCursor > 0 {
-				m.overwriteCursor--
-			}
-		case "down", "j":
-			if m.overwriteCursor < 2 {
-				m.overwriteCursor++
-			}
-		case "enter":
-			switch m.overwriteCursor {
-			case 0: // Overwrite
-				return m, func() tea.Msg { return overwriteConfirmMsg{} }
-			case 1: // Skip
-				return m, func() tea.Msg { return overwriteSkipMsg{} }
-			case 2: // Cancel all
-				m.showOverwritePrompt = false
-				m.userCancelled = true
-				for _, cancel := range m.cancels {
-					cancel()
-				}
-				for i := 0; i < len(m.files); i++ {
-					if m.files[i].selected && m.files[i].status == "" {
-						m.files[i].selected = false
-						m.files[i].outPath = "" // release the claim; not being written
-						if m.totalToProcess > 0 {
-							m.totalToProcess--
-						}
-					}
-				}
-				if m.processingCount == 0 {
-					m.processing = false
-					if m.totalToProcess == 0 {
-						m.done = true
-					}
-				}
-				return m, nil
-			}
-		}
-		return m, nil
+		return m.handleOverwritePromptKey(msg)
 	}
 
 	switch msg.String() {
@@ -322,7 +291,7 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 	case " ":
 		m.files[m.cursor].selected = !m.files[m.cursor].selected
-		if m.files[m.cursor].status == "" {
+		if m.files[m.cursor].status == statusPending {
 			// Drop any stale claim so the output name is recomputed for the
 			// actual next batch (a deselected sibling shouldn't keep reserving a
 			// disambiguated name).
@@ -330,7 +299,7 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 	case "a":
 		for i := range m.files {
-			if m.files[i].status == "" {
+			if m.files[i].status == statusPending {
 				m.files[i].selected = true
 			}
 		}
@@ -339,4 +308,57 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, m.startProcessing()
 	}
 	return m, nil
+}
+
+// handleOverwritePromptKey handles input while the overwrite confirmation dialog
+// is shown; it owns all keys until the user resolves the conflict.
+func (m model) handleOverwritePromptKey(msg tea.KeyMsg) (model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if m.overwriteCursor > 0 {
+			m.overwriteCursor--
+		}
+	case "down", "j":
+		if m.overwriteCursor < 2 {
+			m.overwriteCursor++
+		}
+	case "enter":
+		switch m.overwriteCursor {
+		case 0: // Overwrite
+			return m, func() tea.Msg { return overwriteConfirmMsg{} }
+		case 1: // Skip
+			return m, func() tea.Msg { return overwriteSkipMsg{} }
+		case 2: // Cancel all
+			return m.cancelAll(), nil
+		}
+	}
+	return m, nil
+}
+
+// cancelAll aborts every in-flight encode and drops the rest of the queued
+// batch. It backs the overwrite prompt's "Cancel all" choice.
+func (m model) cancelAll() model {
+	m.showOverwritePrompt = false
+	m.userCancelled = true
+	for _, cancel := range m.cancels {
+		cancel()
+	}
+	for i := range m.files {
+		if m.files[i].selected && m.files[i].status == statusPending {
+			m.files[i].selected = false
+			m.files[i].outPath = "" // release the claim; not being written
+			if m.totalToProcess > 0 {
+				m.totalToProcess--
+			}
+		}
+	}
+	if m.processingCount == 0 {
+		m.processing = false
+		if m.totalToProcess == 0 {
+			m.done = true
+		}
+	}
+	return m
 }
