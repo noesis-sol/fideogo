@@ -76,7 +76,7 @@ func (m model) resolveOutputPath(idx int) string {
 	}
 	ext := filepath.Ext(base)
 	stem := strings.TrimSuffix(base, ext)
-	if srcExt := strings.TrimPrefix(strings.ToLower(filepath.Ext(m.files[idx].path)), "."); srcExt != "" {
+	if srcExt := containerOf(m.files[idx].path); srcExt != "" {
 		if cand := stem + "_" + srcExt + ext; !taken(cand) {
 			return cand
 		}
@@ -408,12 +408,15 @@ func opusAudio(c compressionConfig) []string {
 // unknown (a full pipe would block ffmpeg); without a duration no percent can be
 // computed, so the spinner conveys activity instead.
 func streamProgress(stdout io.Reader, idx int, duration float64) {
+	if duration <= 0 {
+		// No percent is computable without a duration, but stdout must still be
+		// drained or ffmpeg blocks on a full pipe.
+		_, _ = io.Copy(io.Discard, stdout)
+		return
+	}
 	scanner := bufio.NewScanner(stdout)
 	lastPct := -1
 	for scanner.Scan() {
-		if duration <= 0 {
-			continue
-		}
 		matches := timeRegex.FindStringSubmatch(scanner.Text())
 		if len(matches) <= 1 {
 			continue

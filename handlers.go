@@ -6,6 +6,16 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// startFile creates the per-file cancel context, registers it in m.cancels so
+// the UI can abort the encode, and returns the launch cmd. Registering here
+// keeps the invariant "an in-flight file is always in m.cancels" structural —
+// the cancellation paths (handleDone/Error/Cancel, cancelAll) all rely on it.
+func (m model) startFile(idx int) tea.Cmd {
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancels[idx] = cancel
+	return m.processFile(idx, ctx, cancel)
+}
+
 // fillSlots walks selected+unstarted files (skipping skipIdx, pass -1 for none),
 // queuing processFile cmds up to remaining capacity. The overwrite prompt is
 // modal: as soon as a conflict is captured we stop queuing new work and return,
@@ -40,9 +50,7 @@ func (m model) fillSlots(skipIdx int, cmds []tea.Cmd) (model, []tea.Cmd) {
 			// would run beneath a modal dialog.
 			break
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		m.cancels[i] = cancel
-		cmds = append(cmds, m.processFile(i, ctx, cancel))
+		cmds = append(cmds, m.startFile(i))
 	}
 	return m, cmds
 }
@@ -100,15 +108,12 @@ func (m *model) startProcessing() tea.Cmd {
 func (m model) handleOverwriteConfirm() (model, tea.Cmd) {
 	m.showOverwritePrompt = false
 	m.processing = true
-	m.userCancelled = false
 
 	confirmed := m.currentIdx
 	var cmds []tea.Cmd
 	if m.processingCount < m.config.maxConcurrent &&
 		m.files[confirmed].selected && m.files[confirmed].status == statusPending {
-		ctx, cancel := context.WithCancel(context.Background())
-		m.cancels[confirmed] = cancel
-		cmds = append(cmds, m.processFile(confirmed, ctx, cancel))
+		cmds = append(cmds, m.startFile(confirmed))
 	}
 
 	m, cmds = m.fillSlots(confirmed, cmds)
@@ -134,7 +139,7 @@ func (m model) handleOverwriteSkip() (model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	}
 
-	if m.processingCount == 0 && !m.hasUnstartedFiles() {
+	if m.batchSettled() {
 		m.processing = false
 		m.done = true
 	}

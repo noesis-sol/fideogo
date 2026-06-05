@@ -11,6 +11,30 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Installation-dialog styles (static; built once rather than rebuilt on every
+// View() call, matching the package-level style vars in view.go).
+var (
+	errBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("196")).
+			Padding(1, 2).
+			Width(70)
+	errTitleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("196"))
+	errCommandBoxStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("82")).
+				Padding(0, 1).
+				Foreground(lipgloss.Color("82")).
+				Bold(true)
+	errCopyButtonStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("117")).
+				Background(lipgloss.Color("236")).
+				Padding(0, 2)
+)
+
 func getInstallCommand() (osName, command string) {
 	switch runtime.GOOS {
 	case "darwin":
@@ -100,31 +124,8 @@ func (m errorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m errorModel) View() string {
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("196")).
-		Padding(1, 2).
-		Width(70)
-
-	errorTitleStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("196"))
-
-	commandBoxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("82")).
-		Padding(0, 1).
-		Foreground(lipgloss.Color("82")).
-		Bold(true)
-
-	copyButtonStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("117")).
-		Background(lipgloss.Color("236")).
-		Padding(0, 2)
-
 	var content strings.Builder
-	content.WriteString(errorTitleStyle.Render("⚠️  Missing Dependency"))
+	content.WriteString(errTitleStyle.Render("⚠️  Missing Dependency"))
 	content.WriteString("\n\n")
 	content.WriteString(normalStyle.Render("ffmpeg is not installed on your system."))
 	content.WriteString("\n")
@@ -132,7 +133,7 @@ func (m errorModel) View() string {
 	content.WriteString("\n\n")
 	content.WriteString(infoStyle.Render("Installation Instructions for " + m.osName + ":"))
 	content.WriteString("\n\n")
-	content.WriteString(commandBoxStyle.Render(m.command))
+	content.WriteString(errCommandBoxStyle.Render(m.command))
 	content.WriteString("\n\n")
 
 	if m.copied {
@@ -144,7 +145,7 @@ func (m errorModel) View() string {
 		content.WriteString("\n")
 		content.WriteString(helpTextStyle.Render("Please select and copy the command manually."))
 	} else {
-		content.WriteString(copyButtonStyle.Render("Press 'c' or 'enter' to copy"))
+		content.WriteString(errCopyButtonStyle.Render("Press 'c' or 'enter' to copy"))
 		content.WriteString("\n")
 		content.WriteString(helpTextStyle.Render("Or select the command above with your mouse"))
 	}
@@ -152,7 +153,7 @@ func (m errorModel) View() string {
 	content.WriteString("\n\n")
 	content.WriteString(dimStyle.Render("Press ") + keyStyle.Render("q") + dimStyle.Render(" to exit"))
 
-	return "\n" + boxStyle.Render(content.String()) + "\n"
+	return "\n" + errBoxStyle.Render(content.String()) + "\n"
 }
 
 func displayInstallationHelp() {

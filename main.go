@@ -43,6 +43,26 @@ func parseFlagValue(args []string, i int, name, hint string) (string, int) {
 	return args[i+1], 1
 }
 
+const usageText = `Usage: fideogo [options] [path|pattern ...]
+
+Options:
+  --format <fmt>   Output format: mp4, mov, mkv, webm (default: mp4)
+  --size <size>    Target size: sm/small (540p), md/medium (1080p), lg/large (2160p)
+  --hw             Use hardware encoder (VideoToolbox/NVENC/QSV/AMF) — much faster
+  --help, -h       Show this help message
+
+Examples:
+  fideogo                       Compress videos in current directory
+  fideogo video.mp4             Compress a single file
+  fideogo a.mp4 b.mov clip.mkv  Compress several files
+  fideogo */videos/*.mp4        Compress shell-expanded matches
+  fideogo /path/to/dir          Compress videos in a directory
+  fideogo '*.mov'               Compress matching files
+  fideogo --format mkv .        Convert to MKV format
+  fideogo --size sm video.mp4   Compress to 540p
+  fideogo --hw video.mov        Use hardware encoder
+`
+
 // parseArgs extracts --format, --size, --hw flags and positional paths from args in any order.
 // Multiple positional paths are accepted so shell-expanded wildcards (e.g. */videos/*.mp4)
 // just work without quoting.
@@ -61,26 +81,11 @@ func parseArgs(args []string) (format, size string, paths []string, hw bool) {
 			i += skip
 		} else if arg == "--hw" || arg == "-hw" {
 			hw = true
-		} else if args[i] == "--help" || args[i] == "-h" {
-			fmt.Print("Usage: fideogo [options] [path|pattern ...]\n\n")
-			fmt.Print("Options:\n")
-			fmt.Print("  --format <fmt>   Output format: mp4, mov, mkv, webm (default: mp4)\n")
-			fmt.Print("  --size <size>    Target size: sm/small (540p), md/medium (1080p), lg/large (2160p)\n")
-			fmt.Print("  --hw             Use hardware encoder (VideoToolbox/NVENC/QSV/AMF) — much faster\n")
-			fmt.Print("  --help, -h       Show this help message\n\n")
-			fmt.Print("Examples:\n")
-			fmt.Print("  fideogo                       Compress videos in current directory\n")
-			fmt.Print("  fideogo video.mp4             Compress a single file\n")
-			fmt.Print("  fideogo a.mp4 b.mov clip.mkv  Compress several files\n")
-			fmt.Print("  fideogo */videos/*.mp4        Compress shell-expanded matches\n")
-			fmt.Print("  fideogo /path/to/dir          Compress videos in a directory\n")
-			fmt.Print("  fideogo '*.mov'               Compress matching files\n")
-			fmt.Print("  fideogo --format mkv .        Convert to MKV format\n")
-			fmt.Print("  fideogo --size sm video.mp4   Compress to 540p\n")
-			fmt.Print("  fideogo --hw video.mov        Use hardware encoder\n")
+		} else if arg == "--help" || arg == "-h" {
+			fmt.Print(usageText)
 			os.Exit(0)
 		} else {
-			paths = append(paths, args[i])
+			paths = append(paths, arg)
 		}
 	}
 	return
@@ -134,6 +139,10 @@ func createModelFromPaths(paths []string) (model, error) {
 			return model{}, err
 		}
 		for _, f := range files {
+			// findVideos (the directory branch of collectVideosFromArg) returns
+			// relative paths, so re-resolve to absolute before deduping — the same
+			// file reached as a directory entry and as an explicit file arg would
+			// otherwise get two different keys and slip past the dedup.
 			key := f.path
 			if abs, err := filepath.Abs(f.path); err == nil {
 				key = abs
