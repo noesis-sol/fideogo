@@ -7,10 +7,11 @@ import (
 )
 
 // fillSlots walks selected+unstarted files (skipping skipIdx, pass -1 for none),
-// queuing processFile cmds up to remaining capacity. The first overwrite
-// conflict encountered while still within capacity is captured into the prompt
-// fields; scanning stops once capacity is exhausted. Pass in any pre-queued
-// cmds (e.g. a just-confirmed overwrite) so the capacity check stays accurate.
+// queuing processFile cmds up to remaining capacity. The overwrite prompt is
+// modal: as soon as a conflict is captured we stop queuing new work and return,
+// so the user resolves the prompt before anything else starts (the next
+// fillSlots pass resumes after they choose). Pass in any pre-queued cmds (e.g. a
+// just-confirmed overwrite) so the capacity check stays accurate.
 func (m model) fillSlots(skipIdx int, cmds []tea.Cmd) (model, []tea.Cmd) {
 	for i := range m.files {
 		if i == skipIdx || !m.files[i].selected || m.files[i].status != "" {
@@ -19,14 +20,25 @@ func (m model) fillSlots(skipIdx int, cmds []tea.Cmd) (model, []tea.Cmd) {
 		if m.processingCount+len(cmds) >= m.config.maxConcurrent {
 			break
 		}
-		if outputFileExists(m.files[i].path, m.config.outputFormat) {
+		// Resolve and store the output path once, disambiguating against outputs
+		// already claimed by other files in this batch, so two inputs that share
+		// a stem (e.g. a.mp4 and a.mov -> out_a.mp4) never write the same file
+		// concurrently or silently clobber each other.
+		if m.files[i].outPath == "" {
+			m.files[i].outPath = m.resolveOutputPath(i)
+		}
+		if pathExists(m.files[i].outPath) {
 			if !m.showOverwritePrompt {
 				m.showOverwritePrompt = true
 				m.overwriteCursor = 0
-				m.pendingOutputFile = getOutputPath(m.files[i].path, m.config.outputFormat)
+				m.pendingOutputFile = m.files[i].outPath
 				m.currentIdx = i
 			}
-			continue
+			// Don't start later files while a prompt is pending — otherwise a
+			// trailing file can steal the slot the just-confirmed file needs
+			// (silently dropping the user's Overwrite choice), and unrelated work
+			// would run beneath a modal dialog.
+			break
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		m.cancels[i] = cancel
@@ -101,6 +113,7 @@ func (m model) handleOverwriteConfirm() (model, tea.Cmd) {
 func (m model) handleOverwriteSkip() (model, tea.Cmd) {
 	m.showOverwritePrompt = false
 	m.files[m.currentIdx].selected = false
+	m.files[m.currentIdx].outPath = "" // release the claim; file won't be written
 	if m.totalToProcess > 0 {
 		m.totalToProcess--
 	}
@@ -127,6 +140,7 @@ func (m model) handleProcessingStart(msg processingStartMsg) (model, tea.Cmd) {
 		}
 		m.files[msg.idx].status = ""
 		m.files[msg.idx].progress = 0
+		m.files[msg.idx].outPath = "" // unstarted again; recompute next batch
 		if m.processingCount == 0 {
 			m.processing = false
 		}
@@ -188,6 +202,7 @@ func (m model) handleError(msg errorMsg) (model, tea.Cmd) {
 	m.files[msg.idx].status = "error"
 	m.files[msg.idx].err = msg.err
 	m.err = msg.err
+	m.files[msg.idx].outPath = "" // release the claim; this file produced no result
 	delete(m.cancels, msg.idx)
 
 	if wasProcessing && m.processingCount > 0 {
@@ -214,6 +229,7 @@ func (m model) handleCancel(msg cancelMsg) (model, tea.Cmd) {
 	m.files[msg.idx].status = ""
 	m.files[msg.idx].progress = 0
 	m.files[msg.idx].err = nil
+	m.files[msg.idx].outPath = "" // unstarted again; recompute fresh next batch
 	delete(m.cancels, msg.idx)
 	if wasProcessing && m.processingCount > 0 {
 		m.processingCount--
@@ -254,6 +270,7 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (model, tea.Cmd) {
 				for i := 0; i < len(m.files); i++ {
 					if m.files[i].selected && m.files[i].status == "" {
 						m.files[i].selected = false
+						m.files[i].outPath = "" // release the claim; not being written
 						if m.totalToProcess > 0 {
 							m.totalToProcess--
 						}
@@ -305,6 +322,12 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 	case " ":
 		m.files[m.cursor].selected = !m.files[m.cursor].selected
+		if m.files[m.cursor].status == "" {
+			// Drop any stale claim so the output name is recomputed for the
+			// actual next batch (a deselected sibling shouldn't keep reserving a
+			// disambiguated name).
+			m.files[m.cursor].outPath = ""
+		}
 	case "a":
 		for i := range m.files {
 			if m.files[i].status == "" {

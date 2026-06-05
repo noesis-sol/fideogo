@@ -209,21 +209,25 @@ func main() {
 	if hw {
 		encoder, err := resolveHWEncoder()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		m.config.hwEncoder = encoder
+			// No usable hardware encoder — fall back to software instead of
+			// failing every file. resolveHWEncoder only errors after a real
+			// probe-encode failed, so software (libx264) is the correct path.
+			fmt.Fprintf(os.Stderr, "Warning: %v\nFalling back to software (libx264) encoding.\n", err)
+			m.config.hwAccel = false
+		} else {
+			m.config.hwEncoder = encoder
 
-		// Hardware encoders offload to a small fixed number of dedicated engines
-		// (Apple Silicon: 1 on base/Pro, 2 on Max, 4 on Ultra; NVENC/QSV/AMF
-		// likewise cap concurrent sessions) — unrelated to CPU count.
-		// Oversubscribing just serializes at the driver while adding per-process
-		// memory and scheduling overhead, so we cap low. A little parallelism
-		// still overlaps each file's probe, audio encode, and I/O with another
-		// file's video encode.
-		const hwMaxConcurrent = 2
-		if hwMaxConcurrent > m.config.maxConcurrent {
-			m.config.maxConcurrent = hwMaxConcurrent
+			// Hardware encoders offload to a small fixed number of dedicated
+			// engines (Apple Silicon: 1 on base/Pro, 2 on Max, 4 on Ultra;
+			// NVENC/QSV/AMF likewise cap concurrent sessions) — unrelated to CPU
+			// count. Oversubscribing just serializes at the driver while adding
+			// per-process memory and scheduling overhead, so we cap low. A little
+			// parallelism still overlaps each file's probe, audio encode, and I/O
+			// with another file's video encode.
+			const hwMaxConcurrent = 2
+			if hwMaxConcurrent < m.config.maxConcurrent {
+				m.config.maxConcurrent = hwMaxConcurrent
+			}
 		}
 	}
 	m.videoService = newVideoService(m.config)

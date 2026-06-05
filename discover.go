@@ -24,7 +24,21 @@ type videoFile struct {
 	progress float64
 	info     string
 	outInfo  string
-	err      error // Error for this specific file
+	outPath  string // resolved, collision-free output path (assigned when queued)
+	err      error  // Error for this specific file
+}
+
+// safeArgPath guards a discovered relative path against being misread as a
+// command-line option by tools that take the input as a positional argument
+// (ffprobe parses a leading "-" as a flag, unlike ffmpeg's -i). A relative path
+// beginning with "-" (e.g. "-clip.mp4" found in the current directory) is
+// prefixed with "./" so it is unambiguously a path; absolute paths and paths
+// with a leading directory component are returned unchanged.
+func safeArgPath(p string) string {
+	if p == "" || filepath.IsAbs(p) || !strings.HasPrefix(p, "-") {
+		return p
+	}
+	return "." + string(filepath.Separator) + p
 }
 
 func findVideos(dir string) []videoFile {
@@ -82,7 +96,7 @@ func findVideos(dir string) []videoFile {
 		}
 
 		files = append(files, videoFile{
-			path: filepath.Join(dir, name),
+			path: safeArgPath(filepath.Join(dir, name)),
 			name: name,
 		})
 	}

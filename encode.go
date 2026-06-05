@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -43,10 +44,47 @@ func getOutputPath(inputPath, outputFormat string) string {
 	return filepath.Join(dir, outputPrefix+base)
 }
 
-func outputFileExists(inputPath, outputFormat string) bool {
-	output := getOutputPath(inputPath, outputFormat)
-	_, err := os.Stat(output)
+// pathExists reports whether a file or directory exists at p.
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
 	return err == nil
+}
+
+// resolveOutputPath returns the output path for file idx, disambiguated so that
+// no two inputs in the batch map to the same output. Distinct sources that share
+// a stem (e.g. a.mp4 and a.mov both -> out_a.mp4 under --format mp4) would
+// otherwise have concurrent ffmpeg workers write — and on cancel delete — the
+// same file. The first claimant keeps the natural name; later ones fold in the
+// source extension (out_a_mov.mp4), then a numeric suffix if still taken.
+func (m model) resolveOutputPath(idx int) string {
+	base := getOutputPath(m.files[idx].path, m.config.outputFormat)
+	// Compare case-insensitively: macOS (APFS/HFS+) and Windows treat paths that
+	// differ only in case as the SAME file, so two inputs whose stems differ only
+	// in case (A.mp4 / a.mov) would otherwise each "claim" what is really one
+	// physical output. Lowercasing the keys is also correct on case-sensitive
+	// Linux (it only over-disambiguates the rare case-only-difference pair).
+	claimed := make(map[string]bool)
+	for j := range m.files {
+		if j != idx && m.files[j].outPath != "" {
+			claimed[strings.ToLower(m.files[j].outPath)] = true
+		}
+	}
+	taken := func(p string) bool { return claimed[strings.ToLower(p)] }
+	if !taken(base) {
+		return base
+	}
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	if srcExt := strings.TrimPrefix(strings.ToLower(filepath.Ext(m.files[idx].path)), "."); srcExt != "" {
+		if cand := stem + "_" + srcExt + ext; !taken(cand) {
+			return cand
+		}
+	}
+	for n := 1; ; n++ {
+		if cand := fmt.Sprintf("%s-%d%s", stem, n, ext); !taken(cand) {
+			return cand
+		}
+	}
 }
 
 func (vs *videoService) buildFFmpegCommand(ctx context.Context, inputPath, outputPath string, meta videoMetadata) *exec.Cmd {
@@ -139,12 +177,97 @@ func resolveHWEncoder() (string, error) {
 		return "", fmt.Errorf("no hardware H.264 encoder available in this ffmpeg build (looked for: %s)", strings.Join(candidates, ", "))
 	}
 
-	for _, enc := range compiled {
-		if hwDeviceAvailable(enc) {
+	// A compiled-in encoder plus a matching GPU node is necessary but NOT
+	// sufficient: h264_amf is listed and the AMD vendor ID matches even on a
+	// Mesa-only system with no AMF runtime, and an Intel render node doesn't
+	// imply a working QSV stack. So device presence is only a preference hint for
+	// ordering; the gate is a best-effort probe-encode that tries to initialize
+	// the encoder. We return the first candidate that encodes a few frames
+	// without error, so a wrong guess can't make every real file fail.
+	ordered := orderByDevicePresence(compiled)
+	for _, enc := range ordered {
+		switch probeEncode(enc) {
+		case probeOK:
+			return enc, nil
+		case probeTimedOut:
+			// Inconclusive: a cold/slow GPU init and a wedged driver both hit the
+			// deadline, and we can't tell them apart. Don't reject (that would
+			// wrongly downgrade a working-but-slow encoder to software) and don't
+			// keep probing (that would let several wedged candidates stack up
+			// timeouts and freeze startup). Use this device-present candidate and
+			// let any genuine failure surface per file.
 			return enc, nil
 		}
+		// probeFailed: encoder cleanly unavailable (fast error) — try the next.
 	}
-	return compiled[0], nil
+	// Every candidate cleanly failed. If the probe harness itself is unusable (a
+	// stripped ffmpeg without the lavfi color source), the probes false-negative
+	// every encoder — so don't force software. Fall back to the device-presence
+	// heuristic (ordered[0]) and let any real per-file error surface.
+	if !lavfiProbeUsable() {
+		return ordered[0], nil
+	}
+	return "", fmt.Errorf("hardware encoder(s) %s are in this ffmpeg build but none could be initialized on this system", strings.Join(compiled, ", "))
+}
+
+// orderByDevicePresence puts encoders whose backing GPU node is detectable
+// first, preserving relative order, so on a multi-GPU box we probe the encoder
+// matching the GPU that's actually present before the rest.
+func orderByDevicePresence(encoders []string) []string {
+	var present, absent []string
+	for _, enc := range encoders {
+		if hwDeviceAvailable(enc) {
+			present = append(present, enc)
+		} else {
+			absent = append(absent, enc)
+		}
+	}
+	return append(present, absent...)
+}
+
+// probeResult is the outcome of a synthetic probe-encode. A clean failure
+// (encoder genuinely unavailable) is treated very differently from a timeout
+// (slow cold init or a wedged driver — indistinguishable within the deadline),
+// so the caller can reject the former but optimistically use the latter.
+type probeResult int
+
+const (
+	probeOK probeResult = iota
+	probeFailed
+	probeTimedOut
+)
+
+// hwProbeTimeout bounds each synthetic probe-encode. resolveHWEncoder runs
+// before the TUI is drawn, so without a deadline a GPU driver that wedges during
+// encoder init would hang startup with a blank terminal. A healthy encoder
+// passes this 64x64/0.1s probe in well under a second; a genuinely unavailable
+// one errors out fast — so only a slow/wedged init reaches the deadline.
+const hwProbeTimeout = 6 * time.Second
+
+// probeEncode runs a tiny synthetic encode with the given video codec and
+// reports whether ffmpeg exited cleanly, failed fast, or hit the deadline.
+func probeEncode(codec string) probeResult {
+	ctx, cancel := context.WithTimeout(context.Background(), hwProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.1",
+		"-c:v", codec, "-f", "null", "-")
+	err := cmd.Run()
+	if err == nil {
+		return probeOK
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return probeTimedOut
+	}
+	return probeFailed
+}
+
+// lavfiProbeUsable reports whether the probe harness itself works — i.e. ffmpeg
+// has the lavfi input + color source. rawvideo is always compiled in, so a
+// failure here means lavfi/color is missing rather than any encoder being
+// broken; callers use this to avoid false-negating every hardware encoder.
+func lavfiProbeUsable() bool {
+	return probeEncode("rawvideo") == probeOK
 }
 
 // hwDeviceAvailable reports whether the GPU backing the given encoder is present.
@@ -237,7 +360,7 @@ func (vs *videoService) audioArgs(container string) []string {
 // processFile spawns a worker goroutine that probes the input, runs ffmpeg, and
 // streams progress/done/error/cancel messages back to the Bubble Tea program.
 // The worker holds no reference to the model — only the snapshotted path,
-// outputFormat, videoService, and the caller-owned cancel context.
+// resolved output path, videoService, and the caller-owned cancel context.
 //
 // processFile is a read-only value-receiver method: the caller is responsible
 // for creating the cancel context and registering it in m.cancels before
@@ -251,7 +374,11 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 	}
 
 	path := m.files[idx].path
-	outputFormat := m.config.outputFormat
+	output := m.files[idx].outPath
+	if output == "" {
+		// Fallback: resolve directly if the slot filler didn't pre-assign one.
+		output = getOutputPath(path, m.config.outputFormat)
+	}
 	vs := m.videoService
 
 	go func() {
@@ -266,7 +393,6 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 			program.Send(videoInfoMsg{idx: idx, info: vs.formatVideoInfo(path, meta)})
 		}
 
-		output := getOutputPath(path, outputFormat)
 		duration := meta.duration
 
 		cmd := vs.buildFFmpegCommand(ctx, path, output, meta)
