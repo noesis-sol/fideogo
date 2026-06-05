@@ -22,6 +22,8 @@
 - ⚠️ **Smart Overwrite Protection** - Beautiful prompt when output files already exist
 - 🎨 **Color-coded Interface** - Easy-to-read status indicators and navigation hints
 - ⚡ **Optimized Settings** - Pre-configured ffmpeg settings for best quality/size ratio
+- 🖥️ **Hardware Acceleration, Everywhere** - One `--hw` flag taps your GPU's video engine on macOS, Linux, and Windows — VideoToolbox, NVENC, QuickSync, or AMF — and quietly falls back to software when there's nothing to accelerate
+- 🧵 **Tuned to Your Machine** - Batch parallelism and per-job thread budgets scale to your CPU automatically, so encodes run fast without thrashing
 - 🚫 **Cancel Anytime** - Press `c` or `Ctrl+C` to stop rendering mid-process
 
 ## 🖼️ Preview
@@ -77,6 +79,10 @@ fideogo /path/to/videos --format mov
 # Compress to a specific size
 fideogo --size sm video.mp4
 fideogo --size large /path/to/videos
+
+# Let the GPU do the heavy lifting (auto-detects the right encoder)
+fideogo --hw video.mov
+fideogo --hw --size lg /path/to/videos
 ```
 
 ### Wildcard Patterns
@@ -208,12 +214,60 @@ Fideogo uses optimized ffmpeg settings for the best balance between quality and 
 | Setting | Value | Description |
 |---------|-------|-------------|
 | **Codec** | H.264 (libx264) | Universal compatibility |
-| **Preset** | slow | Better compression efficiency |
+| **Preset** | medium | Balanced compression speed and efficiency |
 | **CRF** | 28 | Quality level (lower = better quality) |
 | **Resolution** | 1080p | Scaled height (`--size` flag: 540p / 1080p / 2160p) |
 | **Audio Codec** | AAC | High compatibility |
 | **Audio Bitrate** | 96k | Optimized for voice/music |
 | **Output** | `out_{filename}` | Prefixed in same directory |
+
+## ⚡ Hardware Acceleration & Cross-Platform Performance
+
+Fideogo runs the same everywhere — and gets faster the better your hardware is.
+Add `--hw` and let your GPU's dedicated media engine carry the encode, typically
+several times quicker than software x264:
+
+```bash
+fideogo --hw video.mov
+```
+
+### 🎯 The right encoder, picked for you
+
+No flags to memorize, no per-GPU setup. Fideogo detects the best available
+encoder for your platform and hardware:
+
+| Platform | Encoders tried (in order) | Backend |
+|----------|---------------------------|---------|
+| 🍎 macOS (Intel & Apple Silicon) | `h264_videotoolbox` | Apple VideoToolbox |
+| 🐧 Linux / 🪟 Windows | `h264_nvenc` → `h264_qsv` → `h264_amf` | NVIDIA NVENC · Intel QuickSync · AMD AMF |
+
+And it's careful about it. Fideogo only offers an encoder that your `ffmpeg`
+build actually ships, prefers the one whose GPU is physically present (on Linux
+it even inspects `/dev/nvidia*` and DRM render nodes by vendor), and runs a quick
+probe-encode to confirm it really initializes. If nothing pans out, it **falls
+back to software automatically** — a wrong guess can never make your batch fail.
+
+### 🚀 Smart hardware decoding
+
+Heavy inputs (1440p and up, or AV1 / HEVC / VP9) get GPU-accelerated decoding
+too — VideoToolbox on macOS, auto-selected elsewhere. Lighter files stay on
+software decode to skip the setup overhead, and the whole path is best-effort, so
+a stream the GPU can't handle simply rolls back to software.
+
+### 🧵 Concurrency that fits your CPU
+
+Batch parallelism scales to your core count (~1 job per 4 cores, kept sensible at
+2–4), and every ffmpeg job gets its own thread budget so simultaneous encodes
+don't fight for the CPU. Hardware runs cap at 2 jobs at once — GPU media engines
+are a small, fixed resource, and piling on only adds overhead.
+
+### 🌍 Built to run anywhere
+
+- Reads both modern (`out_time_us`) and older (`out_time_ms`) ffmpeg progress
+  output, so the progress bar stays accurate even on the ffmpeg builds that
+  older Linux distributions ship.
+- Output-name collision handling is case-insensitive, matching how macOS
+  (APFS/HFS+) and Windows actually treat filenames.
 
 ## 📋 Requirements
 
