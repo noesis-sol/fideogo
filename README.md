@@ -185,28 +185,6 @@ The flag works in any position and can be combined with directories, file paths,
 | `c` or `Ctrl+C` | Cancel current processing |
 | `q` | Quit (when not processing) |
 
-## 🎨 Built With
-
-This project is built with the amazing [Charm](https://charm.sh/) ecosystem:
-
-### Core Libraries
-
-- **[Bubble Tea](https://github.com/charmbracelet/bubbletea)** `v1.3.10` - The Elm-inspired TUI framework that powers the entire application architecture
-- **[Bubbles](https://github.com/charmbracelet/bubbles)** `v0.21.0` - Reusable TUI components (progress bars, spinners, etc.)
-- **[Lip Gloss](https://github.com/charmbracelet/lipgloss)** `v1.1.0` - Style definitions and terminal styling for beautiful text rendering
-
-### Supporting Libraries
-
-- **[Harmonica](https://github.com/charmbracelet/harmonica)** `v0.2.0` - Spring-based animations for smooth transitions
-- **[Color Profile](https://github.com/charmbracelet/colorprofile)** `v0.2.3` - Automatic terminal color profile detection
-- **[Charm X - ANSI](https://github.com/charmbracelet/x/tree/main/ansi)** `v0.10.1` - ANSI escape code utilities
-- **[Charm X - Cell Buffer](https://github.com/charmbracelet/x/tree/main/cellbuf)** `v0.0.13` - Terminal cell buffer management
-- **[Charm X - Term](https://github.com/charmbracelet/x/tree/main/term)** `v0.2.1` - Terminal utilities and helpers
-
-### Other Dependencies
-
-- **[go-colorful](https://github.com/lucasb-eyer/go-colorful)** `v1.2.0` - Color manipulation and smooth gradient interpolation for the progress indicator
-
 ## 🎛️ Compression Settings
 
 Fideogo uses optimized ffmpeg settings for the best balance between quality and file size:
@@ -342,6 +320,28 @@ go build -o fideogo main.go && mv fideogo ~/.local/bin/fideogo
 ## 📝 License
 
 This project is open source and available under your chosen license.
+
+## 🎨 Built With
+
+This project is built with the amazing [Charm](https://charm.sh/) ecosystem:
+
+### Core Libraries
+
+- **[Bubble Tea](https://github.com/charmbracelet/bubbletea)** `v1.3.10` - The Elm-inspired TUI framework that powers the entire application architecture
+- **[Bubbles](https://github.com/charmbracelet/bubbles)** `v0.21.0` - Reusable TUI components (progress bars, spinners, etc.)
+- **[Lip Gloss](https://github.com/charmbracelet/lipgloss)** `v1.1.0` - Style definitions and terminal styling for beautiful text rendering
+
+### Supporting Libraries
+
+- **[Harmonica](https://github.com/charmbracelet/harmonica)** `v0.2.0` - Spring-based animations for smooth transitions
+- **[Color Profile](https://github.com/charmbracelet/colorprofile)** `v0.2.3` - Automatic terminal color profile detection
+- **[Charm X - ANSI](https://github.com/charmbracelet/x/tree/main/ansi)** `v0.10.1` - ANSI escape code utilities
+- **[Charm X - Cell Buffer](https://github.com/charmbracelet/x/tree/main/cellbuf)** `v0.0.13` - Terminal cell buffer management
+- **[Charm X - Term](https://github.com/charmbracelet/x/tree/main/term)** `v0.2.1` - Terminal utilities and helpers
+
+### Other Dependencies
+
+- **[go-colorful](https://github.com/lucasb-eyer/go-colorful)** `v1.2.0` - Color manipulation and smooth gradient interpolation for the progress indicator
 
 ## 🙏 Acknowledgments
 
