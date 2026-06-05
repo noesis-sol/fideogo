@@ -1,4 +1,4 @@
-module compress-tui
+module fideogo
 
 go 1.24.0
 
