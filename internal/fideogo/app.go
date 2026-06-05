@@ -1,4 +1,4 @@
-package main
+package fideogo
 
 import (
 	"fmt"
@@ -10,7 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// program is set in main() so worker goroutines can push messages via
+// program is set in Run() so worker goroutines can push messages via
 // program.Send instead of routing through per-file channels.
 var program *tea.Program
 
@@ -161,7 +161,11 @@ func createModelFromPaths(paths []string) (model, error) {
 	return newModel(allFiles), nil
 }
 
-func main() {
+// Run is the application entry point: it checks dependencies, parses CLI flags
+// and positional paths, builds the initial model, and starts the Bubble Tea
+// program. It owns process exit codes (via os.Exit) so cmd/fideogo stays a thin
+// shell around this package.
+func Run() {
 	if err := checkDependencies(); err != nil {
 		displayInstallationHelp()
 		os.Exit(1)

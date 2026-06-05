@@ -52,15 +52,16 @@ This will return the full path (e.g., `/Users/<username>/.local/bin/fideogo`)
 
 ### 2. After Completing Any Task
 
-**ALWAYS** compile and replace the binary at the location found in step 1:
+**ALWAYS** compile and replace the binary at the location found in step 1. The
+entry point lives under `./cmd/fideogo`, so build that package (not `.`):
 
 ```bash
-go build -o fideogo . && mv fideogo <FULL_PATH_FROM_WHICH_COMMAND>
+go build -o fideogo ./cmd/fideogo && mv fideogo <FULL_PATH_FROM_WHICH_COMMAND>
 ```
 
 For example:
 ```bash
-go build -o fideogo . && mv fideogo /Users/michailmichailidis/.local/bin/fideogo
+go build -o fideogo ./cmd/fideogo && mv fideogo /Users/michailmichailidis/.local/bin/fideogo
 ```
 
 ### 3. Never Skip This Step
@@ -69,21 +70,36 @@ The user expects the binary to be updated after every code change. Do not ask pe
 
 ## Project Structure
 
+The repo follows the `/cmd` + `/internal` split from the community
+[golang-standards/project-layout](https://github.com/golang-standards/project-layout):
+a thin executable under `cmd/`, all application code in a single private package
+under `internal/` (so it can't be imported by other modules and tests keep
+white-box access to unexported helpers).
+
 ```
 fideogo/
-├── main.go          # Entry point: CLI parsing, dep check, program bootstrap
-├── config.go        # compressionConfig, defaults, autoMaxConcurrent, validators
-├── discover.go      # videoFile + fileStatus enum, findVideos, collectVideosFromPattern
-├── probe.go         # videoMetadata + ffprobe (single-call) + formatVideoInfo
-├── encode.go        # videoService, buildFFmpegCommand, processFile worker, streamProgress/drainStderr
-├── model.go         # Bubble Tea model, msg types, Init, Update dispatch
-├── handlers.go      # handleX methods, fillSlots state machine, batchSettled predicate
-├── view.go          # View() + renderX helpers, lipgloss styles, gradient + precomputed percent tables
-├── errorui.go       # Missing-ffmpeg installation help dialog
-├── go.mod           # Go module dependencies
-├── go.sum           # Dependency checksums
-└── CLAUDE.md        # This file
+├── cmd/
+│   └── fideogo/
+│       └── main.go      # Thin entry point: calls fideogo.Run()
+├── internal/
+│   └── fideogo/         # package fideogo — all application code
+│       ├── app.go       # Run() entry: CLI parsing, dep check, program bootstrap
+│       ├── config.go    # compressionConfig, defaults, autoMaxConcurrent, validators
+│       ├── discover.go  # videoFile + fileStatus enum, findVideos, collectVideosFromPattern
+│       ├── probe.go     # videoMetadata + ffprobe (single-call) + formatVideoInfo
+│       ├── encode.go    # videoService, buildFFmpegCommand, processFile worker, streamProgress/drainStderr
+│       ├── encode_test.go # ffmpegArgs unit + golden tests (go-cmp)
+│       ├── model.go     # Bubble Tea model, msg types, Init, Update dispatch
+│       ├── handlers.go  # handleX methods, fillSlots state machine, batchSettled predicate
+│       ├── view.go      # View() + renderX helpers, lipgloss styles, gradient + precomputed percent tables
+│       └── errorui.go   # Missing-ffmpeg installation help dialog
+├── go.mod               # Go module dependencies
+├── go.sum               # Dependency checksums
+└── CLAUDE.md            # This file
 ```
+
+Note: file references elsewhere in this doc (e.g. "encode.go", "config.go") now
+live under `internal/fideogo/`.
 
 ## ffmpeg Settings Used
 
