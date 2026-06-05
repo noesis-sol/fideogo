@@ -100,7 +100,7 @@ func (vs *videoService) ffmpegArgs(inputPath, outputPath string, meta videoMetad
 	p := profileFor(containerOf(outputPath))
 
 	// Hardware-accelerated decode flags must precede -i to apply to the input.
-	args := decodeArgs(meta)
+	args := decodeArgs(meta, runtime.GOOS)
 	args = append(args, "-i", inputPath)
 	args = append(args, p.video(vs.config)...)
 	args = append(args, "-vf", "scale=-2:'min("+vs.config.resolution+",ih)'")
@@ -134,14 +134,16 @@ var heavyDecodeCodecs = map[string]bool{
 // available accelerator. Hardware decode is best-effort: if the device can't
 // decode this codec (or none exists), ffmpeg falls back to software on its own,
 // so this never turns a working encode into a failing one.
-func decodeArgs(meta videoMetadata) []string {
+// goos is passed in (rather than read from runtime.GOOS here) so every platform
+// branch is unit-testable on a single host; callers pass runtime.GOOS.
+func decodeArgs(meta videoMetadata, goos string) []string {
 	height, _ := strconv.Atoi(meta.height)
 	heavy := height >= 1440 || heavyDecodeCodecs[strings.ToLower(meta.codec)]
 	if !heavy {
 		return nil
 	}
 
-	switch runtime.GOOS {
+	switch goos {
 	case "darwin":
 		return []string{"-hwaccel", "videotoolbox"}
 	default:
@@ -153,8 +155,8 @@ func decodeArgs(meta videoMetadata) []string {
 // preference order. VAAPI is intentionally omitted: it requires uploading frames
 // to the GPU (format=nv12,hwupload + scale_vaapi), which is incompatible with our
 // software scale filter and would need a separate filter pipeline.
-func hwEncoderCandidates() []string {
-	if runtime.GOOS == "darwin" {
+func hwEncoderCandidates(goos string) []string {
+	if goos == "darwin" {
 		return []string{"h264_videotoolbox"}
 	}
 	// NVIDIA, then Intel QuickSync, then AMD AMF.
@@ -169,7 +171,7 @@ func hwEncoderCandidates() []string {
 // container), it falls back to the first compiled-in encoder and lets ffmpeg
 // surface any device error per file rather than guessing wrong here.
 func resolveHWEncoder() (string, error) {
-	candidates := hwEncoderCandidates()
+	candidates := hwEncoderCandidates(runtime.GOOS)
 	out, err := exec.Command("ffmpeg", "-hide_banner", "-encoders").Output()
 	if err != nil {
 		return "", fmt.Errorf("could not query ffmpeg encoders: %w", err)
@@ -193,7 +195,7 @@ func resolveHWEncoder() (string, error) {
 	// ordering; the gate is a best-effort probe-encode that tries to initialize
 	// the encoder. We return the first candidate that encodes a few frames
 	// without error, so a wrong guess can't make every real file fail.
-	ordered := orderByDevicePresence(compiled)
+	ordered := orderByDevicePresence(compiled, hostDeviceProbe())
 	for _, enc := range ordered {
 		switch probeEncode(enc) {
 		case probeOK:
@@ -222,10 +224,10 @@ func resolveHWEncoder() (string, error) {
 // orderByDevicePresence puts encoders whose backing GPU node is detectable
 // first, preserving relative order, so on a multi-GPU box we probe the encoder
 // matching the GPU that's actually present before the rest.
-func orderByDevicePresence(encoders []string) []string {
+func orderByDevicePresence(encoders []string, probe deviceProbe) []string {
 	var present, absent []string
 	for _, enc := range encoders {
-		if hwDeviceAvailable(enc) {
+		if probe.available(enc) {
 			present = append(present, enc)
 		} else {
 			absent = append(absent, enc)
@@ -279,35 +281,59 @@ func lavfiProbeUsable() bool {
 	return probeEncode("rawvideo") == probeOK
 }
 
-// hwDeviceAvailable reports whether the GPU backing the given encoder is present.
-// Device nodes are only probeable on Linux; elsewhere (Windows, macOS) we can't
-// cheaply tell, so we assume available and rely on ffmpeg to error if not.
-func hwDeviceAvailable(encoder string) bool {
-	if runtime.GOOS != "linux" {
+// deviceProbe locates the GPU device nodes that back each hardware encoder. The
+// target OS and a filesystem root are fields — rather than direct runtime.GOOS
+// and absolute /dev, /sys reads — so the Linux probe logic can be unit-tested
+// against a synthetic device tree on any host. A zero root ("") means the real
+// filesystem root.
+type deviceProbe struct {
+	goos string
+	root string
+}
+
+// hostDeviceProbe probes the real running system.
+func hostDeviceProbe() deviceProbe {
+	return deviceProbe{goos: runtime.GOOS}
+}
+
+// rooted prepends the probe's filesystem root to an absolute device/sysfs path.
+// Glob metacharacters in p are preserved (filepath.Join treats them literally).
+func (d deviceProbe) rooted(p string) string {
+	if d.root == "" {
+		return p
+	}
+	return filepath.Join(d.root, p)
+}
+
+// available reports whether the GPU backing the given encoder is present. Device
+// nodes are only probeable on Linux; elsewhere (Windows, macOS) we can't cheaply
+// tell, so we assume available and rely on ffmpeg to error if not.
+func (d deviceProbe) available(encoder string) bool {
+	if d.goos != "linux" {
 		return true
 	}
 	switch encoder {
 	case "h264_nvenc":
 		// NVIDIA driver exposes /dev/nvidia0, /dev/nvidia1, …
-		matches, _ := filepath.Glob("/dev/nvidia[0-9]*")
+		matches, _ := filepath.Glob(d.rooted("/dev/nvidia[0-9]*"))
 		return len(matches) > 0
 	case "h264_qsv":
-		return drmRenderVendorPresent("0x8086") // Intel
+		return d.drmVendorPresent("0x8086") // Intel
 	case "h264_amf":
-		return drmRenderVendorPresent("0x1002") // AMD
+		return d.drmVendorPresent("0x1002") // AMD
 	}
 	return true
 }
 
-// drmRenderVendorPresent reports whether any DRM render node (/dev/dri/renderD*)
-// is backed by a GPU with the given PCI vendor ID (read from sysfs). Used to tell
+// drmVendorPresent reports whether any DRM render node (/dev/dri/renderD*) is
+// backed by a GPU with the given PCI vendor ID (read from sysfs). Used to tell
 // Intel (QSV) and AMD (AMF) render nodes apart, since the node path alone doesn't
 // identify the vendor.
-func drmRenderVendorPresent(vendorID string) bool {
-	nodes, _ := filepath.Glob("/dev/dri/renderD*")
+func (d deviceProbe) drmVendorPresent(vendorID string) bool {
+	nodes, _ := filepath.Glob(d.rooted("/dev/dri/renderD*"))
 	for _, node := range nodes {
 		name := filepath.Base(node) // e.g. renderD128
-		data, err := os.ReadFile("/sys/class/drm/" + name + "/device/vendor")
+		data, err := os.ReadFile(d.rooted("/sys/class/drm/" + name + "/device/vendor"))
 		if err != nil {
 			continue
 		}

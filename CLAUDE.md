@@ -101,6 +101,38 @@ fideogo/
 Note: file references elsewhere in this doc (e.g. "encode.go", "config.go") now
 live under `internal/fideogo/`.
 
+## Testing
+
+Tests live beside the code in `internal/fideogo` (white-box, `package fideogo`).
+
+- **Unit tests** — `go test ./...`. Pure and hermetic: they never exec ffmpeg.
+  OS-specific logic is *injectable* rather than reading `runtime.GOOS` / the real
+  filesystem inline, so every platform branch is covered on a single host:
+  - `decodeArgs(meta, goos)` and `hwEncoderCandidates(goos)` take the target OS as
+    a parameter (production callers pass `runtime.GOOS`); tests pass
+    darwin/linux/windows.
+  - `deviceProbe{goos, root}` points the Linux GPU-node probe at a synthetic
+    `/dev` + `/sys` tree under a temp dir, so NVENC/QSV/AMF detection is tested
+    without a real GPU or a Linux host.
+
+  When adding OS- or filesystem-dependent behavior, thread the dependency in the
+  same way instead of calling `runtime.GOOS` / `os` directly — keep it
+  unit-testable on one machine.
+
+- **Integration tests** — `go test -tags=integration ./...`. Behind the
+  `integration` build tag: they generate a tiny clip, run a real ffmpeg encode end
+  to end, then ffprobe the result. Skipped automatically when ffmpeg/ffprobe are
+  not on PATH, so the default `go test` stays hermetic.
+
+- **Local Linux reproduction** — `docker build -f Dockerfile.test -t fideogo-test .`
+  then `docker run --rm fideogo-test`. Runs vet + unit + integration on Linux with
+  a real ffmpeg, exercising the `GOOS=linux` paths. (Hardware encoders still need a
+  real GPU; macOS/VideoToolbox can't run in a Linux container.)
+
+- **CI** — `.github/workflows/ci.yml` runs the suite (including integration) on a
+  matrix of `ubuntu-latest` and `macos-latest`, installing ffmpeg on each, so the
+  darwin and linux paths run on their actual platforms.
+
 ## ffmpeg Settings Used
 
 Defaults below; most are overridable via CLI flags (run with `--help`). The values

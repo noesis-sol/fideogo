@@ -1,0 +1,25 @@
+# Dockerfile.test — local Linux reproduction of the full test suite, including
+# the integration tests that shell out to a real ffmpeg. This is a test harness,
+# not a production/runtime image for the app.
+#
+#   docker build -f Dockerfile.test -t fideogo-test .
+#   docker run --rm fideogo-test
+#
+FROM golang:1.24-bookworm
+
+# ffmpeg + ffprobe for the integration tests; software encoders only (no GPU).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Cache module downloads before copying the full tree so edits don't re-download.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Vet, then unit + integration tests, on Linux — exercising the GOOS=linux
+# branches and a real software encode end to end.
+CMD ["sh", "-c", "go vet ./... && go test -tags=integration ./..."]

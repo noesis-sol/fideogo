@@ -324,7 +324,7 @@ func TestDecodeArgs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := decodeArgs(tt.meta)
+			got := decodeArgs(tt.meta, "linux")
 			if tt.heavy && len(got) == 0 {
 				t.Errorf("expected hwaccel decode args, got none")
 			}
