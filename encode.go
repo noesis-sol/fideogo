@@ -87,22 +87,30 @@ func (m model) resolveOutputPath(idx int) string {
 	}
 }
 
-func (vs *videoService) buildFFmpegCommand(ctx context.Context, inputPath, outputPath string, meta videoMetadata) *exec.Cmd {
-	container := strings.ToLower(strings.TrimPrefix(filepath.Ext(outputPath), "."))
+// containerOf returns the lowercased container extension of a path (e.g. "mp4").
+func containerOf(outputPath string) string {
+	return strings.ToLower(strings.TrimPrefix(filepath.Ext(outputPath), "."))
+}
+
+// ffmpegArgs assembles the full ffmpeg argument list for one encode. It is a
+// pure function of its inputs (no exec, no process), so the command can be
+// unit-tested in isolation; buildFFmpegCommand only wraps it in an *exec.Cmd.
+func (vs *videoService) ffmpegArgs(inputPath, outputPath string, meta videoMetadata) []string {
+	p := profileFor(containerOf(outputPath))
 
 	// Hardware-accelerated decode flags must precede -i to apply to the input.
 	args := decodeArgs(meta)
 	args = append(args, "-i", inputPath)
-	args = append(args, vs.videoArgs(container)...)
+	args = append(args, p.video(vs.config)...)
 	args = append(args, "-vf", "scale=-2:'min("+vs.config.resolution+",ih)'")
-	args = append(args, vs.audioArgs(container)...)
-
-	// movflags is only valid for MP4/MOV containers.
-	if container == "mp4" || container == "mov" || container == "m4v" {
-		args = append(args, "-movflags", "+faststart")
-	}
+	args = append(args, p.audio(vs.config)...)
+	args = append(args, p.muxFlags...)
 	args = append(args, "-progress", "pipe:1", "-loglevel", "error", "-y", outputPath)
-	return exec.CommandContext(ctx, "ffmpeg", args...)
+	return args
+}
+
+func (vs *videoService) buildFFmpegCommand(ctx context.Context, inputPath, outputPath string, meta videoMetadata) *exec.Cmd {
+	return exec.CommandContext(ctx, "ffmpeg", vs.ffmpegArgs(inputPath, outputPath, meta)...)
 }
 
 // heavyDecodeCodecs are modern codecs whose software decode is CPU-expensive
@@ -326,35 +334,69 @@ func hwEncoderArgs(c compressionConfig) []string {
 	}
 }
 
-// videoArgs returns the video-codec ffmpeg arguments for the target container.
-func (vs *videoService) videoArgs(container string) []string {
-	// WebM only accepts VP8/VP9/AV1 video, so H.264 (including the
-	// h264_videotoolbox HW encoder) is invalid here — always use VP9.
-	// -b:v 0 puts libvpx-vp9 in constant-quality mode driven by -crf.
-	if container == "webm" {
-		return []string{
-			"-c:v", "libvpx-vp9", "-crf", vs.config.crf, "-b:v", "0", "-row-mt", "1",
-			"-threads", strconv.Itoa(autoThreadsPerJob(vs.config.maxConcurrent)),
+// containerProfile captures everything container-specific about an encode in one
+// place: which video/audio codec arguments the container accepts, any muxer
+// flags it needs, and whether a hardware H.264 encoder is usable for it.
+// Consolidating these here keeps per-container decisions from scattering across
+// the codec helpers, the command builder, and CLI validation.
+type containerProfile struct {
+	video    func(c compressionConfig) []string
+	audio    func(c compressionConfig) []string
+	muxFlags []string
+	allowsHW bool
+}
+
+// profileFor returns the encoding profile for a container extension. Unknown
+// containers fall back to the H.264/AAC family (same as mkv), the
+// broadest-compatibility default.
+func profileFor(container string) containerProfile {
+	switch container {
+	case "webm":
+		// WebM only accepts VP8/VP9/AV1 video + Vorbis/Opus audio, so H.264
+		// (including the h264_videotoolbox HW encoder) is never usable here.
+		return containerProfile{video: vp9Video, audio: opusAudio, allowsHW: false}
+	case "mp4", "mov", "m4v":
+		// +faststart moves the moov atom to the front for progressive playback;
+		// it is only valid for the ISO-BMFF (MP4/MOV) family.
+		return containerProfile{
+			video: h264Video, audio: aacAudio,
+			muxFlags: []string{"-movflags", "+faststart"}, allowsHW: true,
 		}
-	}
-	if vs.config.hwAccel {
-		return hwEncoderArgs(vs.config)
-	}
-	// Cap CPU threads per job so concurrent ffmpegs don't thrash. HW encoders
-	// don't benefit from this since they offload to the media engine.
-	return []string{
-		"-c:v", vs.config.codec, "-preset", vs.config.preset, "-crf", vs.config.crf,
-		"-threads", strconv.Itoa(autoThreadsPerJob(vs.config.maxConcurrent)),
+	default: // mkv and any unknown container
+		return containerProfile{video: h264Video, audio: aacAudio, allowsHW: true}
 	}
 }
 
-// audioArgs returns the audio-codec ffmpeg arguments for the target container.
-// WebM requires Vorbis/Opus rather than AAC.
-func (vs *videoService) audioArgs(container string) []string {
-	if container == "webm" {
-		return []string{"-c:a", "libopus", "-b:a", vs.config.audioBitrate}
+// h264Video returns the H.264 video arguments, preferring the resolved hardware
+// encoder when hardware acceleration is enabled. Software encoding caps CPU
+// threads per job so concurrent ffmpegs don't thrash; HW encoders skip the cap
+// since they offload to the media engine.
+func h264Video(c compressionConfig) []string {
+	if c.hwAccel {
+		return hwEncoderArgs(c)
 	}
-	return []string{"-c:a", "aac", "-b:a", vs.config.audioBitrate}
+	return []string{
+		"-c:v", c.codec, "-preset", c.preset, "-crf", c.crf,
+		"-threads", strconv.Itoa(autoThreadsPerJob(c.maxConcurrent)),
+	}
+}
+
+// vp9Video returns libvpx-vp9 arguments in constant-quality mode (-b:v 0 hands
+// rate control to -crf). row-mt plus a per-job thread cap keep concurrent
+// software encodes from thrashing.
+func vp9Video(c compressionConfig) []string {
+	return []string{
+		"-c:v", "libvpx-vp9", "-crf", c.crf, "-b:v", "0", "-row-mt", "1",
+		"-threads", strconv.Itoa(autoThreadsPerJob(c.maxConcurrent)),
+	}
+}
+
+func aacAudio(c compressionConfig) []string {
+	return []string{"-c:a", "aac", "-b:a", c.audioBitrate}
+}
+
+func opusAudio(c compressionConfig) []string {
+	return []string{"-c:a", "libopus", "-b:a", c.audioBitrate}
 }
 
 // processFile spawns a worker goroutine that probes the input, runs ffmpeg, and

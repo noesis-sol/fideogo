@@ -171,10 +171,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	if hw && format == "webm" {
+	if hw && !profileFor(format).allowsHW {
 		// h264_videotoolbox emits H.264, which a WebM container can't hold;
 		// WebM always goes through the software VP9 encoder instead.
-		fmt.Fprintf(os.Stderr, "Error: --hw is not compatible with --format webm (WebM requires VP9)\n")
+		fmt.Fprintf(os.Stderr, "Error: --hw is not compatible with --format %s (it requires a software codec)\n", format)
 		os.Exit(1)
 	}
 
