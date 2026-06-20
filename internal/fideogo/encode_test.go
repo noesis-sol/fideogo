@@ -176,7 +176,7 @@ func TestFFmpegArgsGolden(t *testing.T) {
 			want: []string{
 				"-i", "input.mov",
 				"-c:v", "libx264", "-preset", "medium", "-crf", "28", "-threads", threads,
-				"-vf", "scale=-2:'min(1080,ih)'",
+				"-vf", "scale=-2:'2*trunc(min(1080,ih)/2)'",
 				"-c:a", "aac", "-b:a", "96k",
 				"-movflags", "+faststart",
 				"-progress", "pipe:1", "-loglevel", "error", "-y", "out_video.mp4",
@@ -189,7 +189,7 @@ func TestFFmpegArgsGolden(t *testing.T) {
 			want: []string{
 				"-i", "input.mov",
 				"-c:v", "libx264", "-preset", "medium", "-crf", "28", "-threads", threads,
-				"-vf", "scale=-2:'min(1080,ih)'",
+				"-vf", "scale=-2:'2*trunc(min(1080,ih)/2)'",
 				"-c:a", "aac", "-b:a", "96k",
 				"-movflags", "+faststart",
 				"-progress", "pipe:1", "-loglevel", "error", "-y", "out_video.mov",
@@ -202,7 +202,7 @@ func TestFFmpegArgsGolden(t *testing.T) {
 			want: []string{
 				"-i", "input.mov",
 				"-c:v", "libx264", "-preset", "medium", "-crf", "28", "-threads", threads,
-				"-vf", "scale=-2:'min(1080,ih)'",
+				"-vf", "scale=-2:'2*trunc(min(1080,ih)/2)'",
 				"-c:a", "aac", "-b:a", "96k",
 				"-progress", "pipe:1", "-loglevel", "error", "-y", "out_video.mkv",
 			},
@@ -214,7 +214,7 @@ func TestFFmpegArgsGolden(t *testing.T) {
 			want: []string{
 				"-i", "input.mov",
 				"-c:v", "libvpx-vp9", "-crf", "28", "-b:v", "0", "-row-mt", "1", "-threads", threads,
-				"-vf", "scale=-2:'min(1080,ih)'",
+				"-vf", "scale=-2:'2*trunc(min(1080,ih)/2)'",
 				"-c:a", "libopus", "-b:a", "96k",
 				"-progress", "pipe:1", "-loglevel", "error", "-y", "out_video.webm",
 			},
@@ -226,7 +226,7 @@ func TestFFmpegArgsGolden(t *testing.T) {
 			want: []string{
 				"-i", "input.mov",
 				"-c:v", "h264_videotoolbox", "-q:v", "65",
-				"-vf", "scale=-2:'min(1080,ih)'",
+				"-vf", "scale=-2:'2*trunc(min(1080,ih)/2)'",
 				"-c:a", "aac", "-b:a", "96k",
 				"-movflags", "+faststart",
 				"-progress", "pipe:1", "-loglevel", "error", "-y", "out_video.mp4",
@@ -263,7 +263,7 @@ func TestFFmpegArgsHeavySourceExact(t *testing.T) {
 	want := append(append([]string{}, decodePrefix...),
 		"-i", "input.mkv",
 		"-c:v", "libx264", "-preset", "medium", "-crf", "28", "-threads", threads,
-		"-vf", "scale=-2:'min(1080,ih)'",
+		"-vf", "scale=-2:'2*trunc(min(1080,ih)/2)'",
 		"-c:a", "aac", "-b:a", "96k",
 		"-movflags", "+faststart",
 		"-progress", "pipe:1", "-loglevel", "error", "-y", "out_video.mp4",

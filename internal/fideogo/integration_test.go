@@ -44,7 +44,7 @@ func TestEncodeIntegration(t *testing.T) {
 	}
 	vs := newVideoService(cfg)
 
-	meta, err := vs.probeMetadata(src)
+	meta, err := vs.probeMetadata(context.Background(), src)
 	if err != nil {
 		t.Fatalf("probing source failed: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestEncodeIntegration(t *testing.T) {
 		t.Fatal("output file is empty")
 	}
 
-	outMeta, err := vs.probeMetadata(out)
+	outMeta, err := vs.probeMetadata(context.Background(), out)
 	if err != nil {
 		t.Fatalf("probing output failed: %v", err)
 	}

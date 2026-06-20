@@ -146,8 +146,12 @@ encode.go (`ffmpegArgs` / `profileFor`).
   - `--hw` substitutes a hardware H.264 encoder (VideoToolbox / NVENC / QSV / AMF)
     when one initializes successfully, falling back to software otherwise
   - `webm` output uses libvpx-vp9 (`-crf 28 -b:v 0`) since the container can't carry H.264
-- Resolution: scaled to 1080p height and never upscaled (`scale=-2:'min(1080,ih)'`);
-  `--size sm|md|lg` selects 540 / 1080 / 2160
+- Resolution: scaled to 1080p height and never upscaled
+  (`scale=-2:'2*trunc(min(1080,ih)/2)'`); `--size sm|md|lg` selects 540 / 1080 /
+  2160. Both dimensions are forced even — `-2` rounds the width, and the
+  `2*trunc(.../2)` wrapper rounds the height — so an odd-height 4:2:0 source (where
+  no downscale happens, ih ≤ target) can't reach libx264/yuv420p and abort with
+  "height not divisible by 2".
 - Audio: AAC at 96k (Opus at 96k for webm)
 - Concurrency: software encodes are thread-capped per job so parallel jobs don't
   thrash; hardware runs cap at 2 concurrent jobs
@@ -155,9 +159,14 @@ encode.go (`ffmpegArgs` / `profileFor`).
   naming within a batch. With `--overwrite`, the source file is replaced in place
   instead: ffmpeg encodes to a hidden `.…fideogo-tmp` scratch file next to the
   destination, which is atomically renamed over the original on success (and the
-  original removed if `--format` changed its extension). The collision prompt is
-  skipped in this mode. A bare `--overwrite` keeps each file's own container; pair
-  it with `--format` to also convert.
+  original removed if `--format` changed its extension). A bare `--overwrite` keeps
+  each file's own container; pair it with `--format` to also convert. The collision
+  prompt is skipped when the destination *is* the source (the consented case), but
+  an in-place `--format` conversion onto a *different*, pre-existing file still
+  prompts before clobbering it. Two selected sources that would map to the same
+  in-place destination (e.g. `clip.mov` and `clip.mp4` under `--format mp4`) are
+  refused with a per-file error — there is no safe disambiguation in this mode —
+  while the rest of the batch proceeds (see `markInPlaceCollisions`).
 
 ## Rendering & Performance Notes
 

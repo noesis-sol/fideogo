@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -100,34 +102,38 @@ func parseArgs(args []string) (format, size string, paths []string, hw, overwrit
 // named file is pre-selected; directories and patterns are left unselected so
 // the user picks them in the TUI (newModel auto-selects when only one results).
 func collectVideosFromArg(arg string) ([]videoFile, error) {
+	// A real file or directory by this exact name takes precedence over glob
+	// interpretation, so inputs whose names literally contain glob metacharacters
+	// ([ ] * ?) — common from duplicate-download renaming like "clip[1].mov" —
+	// stay reachable instead of being mis-parsed as a (usually non-matching)
+	// pattern and rejected.
+	if info, err := os.Stat(arg); err == nil {
+		if info.IsDir() {
+			return findVideos(arg), nil
+		}
+		ext := strings.ToLower(filepath.Ext(arg))
+		if !videoExtensions[ext] {
+			return nil, fmt.Errorf("%s is not a supported video file\nSupported extensions: .mp4, .mov, .avi, .mkv, .m4v, .webm", arg)
+		}
+		absPath, err := filepath.Abs(arg)
+		if err != nil {
+			return nil, fmt.Errorf("error resolving path: %w", err)
+		}
+		return []videoFile{{
+			path:     absPath,
+			name:     filepath.Base(arg),
+			selected: true,
+		}}, nil
+	}
+
+	// No literal match: an arg with metacharacters is treated as a glob pattern.
 	if strings.ContainsAny(arg, "*?[") {
 		return collectVideosFromPattern(arg)
 	}
 
-	info, err := os.Stat(arg)
-	if err != nil {
-		return nil, err
-	}
-
-	if info.IsDir() {
-		return findVideos(arg), nil
-	}
-
-	ext := strings.ToLower(filepath.Ext(arg))
-	if !videoExtensions[ext] {
-		return nil, fmt.Errorf("%s is not a supported video file\nSupported extensions: .mp4, .mov, .avi, .mkv, .m4v, .webm", arg)
-	}
-
-	absPath, err := filepath.Abs(arg)
-	if err != nil {
-		return nil, fmt.Errorf("error resolving path: %w", err)
-	}
-
-	return []videoFile{{
-		path:     absPath,
-		name:     filepath.Base(arg),
-		selected: true,
-	}}, nil
+	// Neither a literal path nor a pattern: surface the stat error (e.g. ENOENT).
+	_, err := os.Stat(arg)
+	return nil, err
 }
 
 // createModelFromPaths merges the videos referenced by every positional
@@ -253,9 +259,47 @@ func Run() {
 	}
 	m.videoService = newVideoService(m.config)
 
+	// In overwrite mode without --format (format == ""), each file keeps its own
+	// container. A WebM source can't carry H.264, so --hw silently falls back to
+	// software VP9 for it — warn rather than let the user believe hardware encoding
+	// applied to every file.
+	if m.config.hwAccel && format == "" {
+		webm := 0
+		for _, f := range m.files {
+			if !profileFor(containerOf(f.path)).allowsHW {
+				webm++
+			}
+		}
+		if webm > 0 {
+			fmt.Fprintf(os.Stderr, "Warning: --hw cannot produce WebM (VP9) output; %d source(s) will be encoded with software VP9 instead.\n", webm)
+		}
+	}
+
 	program = tea.NewProgram(m, tea.WithoutSignalHandler())
-	if _, err := program.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+
+	// Bubble Tea consumes Ctrl+C as a key while the terminal is in raw mode, but an
+	// external SIGINT/SIGTERM (kill, closed terminal) would otherwise terminate the
+	// process abruptly — skipping the terminal restore and leaving in-flight ffmpeg
+	// children running. Translate those signals into a graceful Quit so Run()
+	// returns and the cleanup below executes.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		<-sigCh
+		program.Quit()
+	}()
+
+	finalModel, runErr := program.Run()
+	// However the program ended (normal quit, signal, or error), cancel every
+	// still-registered encode so no ffmpeg child is orphaned past our exit.
+	if fm, ok := finalModel.(model); ok {
+		for _, cancel := range fm.cancels {
+			cancel()
+		}
+	}
+	if runErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", runErr)
 		os.Exit(1)
 	}
 }

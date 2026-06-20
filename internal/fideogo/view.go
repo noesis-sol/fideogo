@@ -219,9 +219,23 @@ func (m model) renderProgress(s *strings.Builder, f videoFile) {
 	}
 }
 
+// anyErrors reports whether any file in the batch ended in the error state. Used
+// by the footer to distinguish a clean completion from one with failures. Cheap
+// (a bounded scan, no allocation), so it stays in the render path.
+func (m model) anyErrors() bool {
+	for _, f := range m.files {
+		if f.status == statusError {
+			return true
+		}
+	}
+	return false
+}
+
 // renderFooter writes the contextual help/status line at the bottom of the view.
 func (m model) renderFooter(s *strings.Builder) {
 	switch {
+	case m.done && m.anyErrors():
+		s.WriteString(helpTextStyle.Render("Done — some files had errors (see above). Press ") + keyStyle.Render("q") + helpTextStyle.Render(" to quit."))
 	case m.done:
 		s.WriteString(helpTextStyle.Render("All done! Press ") + keyStyle.Render("q") + helpTextStyle.Render(" to quit."))
 	case m.processing:

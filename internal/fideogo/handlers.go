@@ -2,6 +2,9 @@ package fideogo
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -27,7 +30,23 @@ func (m model) fillSlots(skipIdx int, cmds []tea.Cmd) (model, []tea.Cmd) {
 		if i == skipIdx || !m.files[i].selected || m.files[i].status != statusPending {
 			continue
 		}
-		if m.processingCount+len(cmds) >= m.config.maxConcurrent {
+		// startFile registers a cancel in m.cancels and launches the worker
+		// immediately, but the file's status flips to statusProcessing (and
+		// processingCount increments) only later, when the async processingStartMsg
+		// is handled. In that gap the file is still statusPending, so without this
+		// guard a sibling's terminal message (e.g. a fast probe failure that
+		// re-enters fillSlots) could pick the file again and launch a SECOND ffmpeg
+		// for it — two encodes racing on one output, with the first worker's cancel
+		// orphaned. m.cancels is the authoritative "in flight" set, so skip anything
+		// already in it.
+		if _, inFlight := m.cancels[i]; inFlight {
+			continue
+		}
+		// Gate capacity on the true in-flight count (m.cancels), which includes
+		// launched-but-unconfirmed files, rather than processingCount (which lags
+		// until processingStartMsg) — otherwise concurrent encodes can exceed
+		// maxConcurrent during the launch window.
+		if len(m.cancels) >= m.config.maxConcurrent {
 			break
 		}
 		// Resolve and store the output path once, disambiguating against outputs
@@ -37,9 +56,14 @@ func (m model) fillSlots(skipIdx int, cmds []tea.Cmd) (model, []tea.Cmd) {
 		if m.files[i].outPath == "" {
 			m.files[i].outPath = m.resolveOutputPath(i)
 		}
-		// In-place mode always overwrites by design, so skip the collision prompt —
-		// the source file (the destination) necessarily already exists.
-		if !m.config.inPlace && pathExists(m.files[i].outPath) {
+		// Prompt before clobbering an existing, distinct file. Plain in-place
+		// (destination == source) is the consented case and needs no prompt, but an
+		// in-place --format conversion whose destination is a *different*,
+		// pre-existing file must prompt — as must every non-in-place out_ file.
+		// Gate on "destination exists and is not the source"; EqualFold so a
+		// case-only spelling difference on a case-insensitive filesystem still
+		// counts as the source (not a clobber).
+		if pathExists(m.files[i].outPath) && !strings.EqualFold(m.files[i].outPath, m.files[i].path) {
 			if !m.showOverwritePrompt {
 				m.showOverwritePrompt = true
 				m.overwriteCursor = 0
@@ -83,12 +107,65 @@ func (m model) hasUnstartedFiles() bool {
 // handlers (done/error/cancel) share it to decide when to leave the processing
 // state.
 func (m model) batchSettled() bool {
-	return m.processingCount == 0 &&
+	// len(m.cancels) is the true in-flight count: a file sits in the map from the
+	// instant startFile launches it until its terminal message is handled. That is
+	// stricter than processingCount (which only counts files past
+	// processingStartMsg), so settling on it can't declare the batch done while a
+	// just-launched worker is still spinning up.
+	return len(m.cancels) == 0 &&
 		(m.userCancelled || (!m.showOverwritePrompt && !m.hasUnstartedFiles()))
+}
+
+// markInPlaceCollisions flags, as errors, every selected-and-pending in-place
+// file whose destination is shared by another selected-and-pending file. Two
+// distinct sources cannot both be replaced in place into one path without losing
+// data, and the in-place contract forbids out_-style disambiguation, so the only
+// safe action is to refuse the colliding files while letting the rest proceed.
+// Destinations are compared case-folded so clip.MP4/clip.mp4 collide on a
+// case-insensitive filesystem too. A no-op outside in-place mode, and when
+// outputFormat is empty (plain --overwrite) every destination equals its own
+// unique source, so nothing collides.
+func (m *model) markInPlaceCollisions() {
+	if !m.config.inPlace {
+		return
+	}
+	dests := make([]string, len(m.files))
+	counts := make(map[string]int)
+	for i := range m.files {
+		if !m.files[i].selected || m.files[i].status != statusPending {
+			continue
+		}
+		d := strings.ToLower(inPlaceDest(m.files[i].path, m.config.outputFormat))
+		dests[i] = d
+		counts[d]++
+	}
+	for i := range m.files {
+		if dests[i] == "" || counts[dests[i]] <= 1 {
+			continue
+		}
+		m.files[i].status = statusError
+		m.files[i].err = fmt.Errorf(
+			"skipped: multiple selected inputs map to the same in-place destination %q under --format %s; rename one or drop --format",
+			filepath.Base(inPlaceDest(m.files[i].path, m.config.outputFormat)), m.config.outputFormat)
+		m.files[i].outPath = ""
+		m.err = m.files[i].err
+	}
 }
 
 func (m *model) startProcessing() tea.Cmd {
 	m.userCancelled = false
+	// done and completedCount are per-batch: clear them so a batch started after an
+	// earlier one finished doesn't render a stale "All done!" footer or carry the
+	// previous batch's count into the "(N completed)" header.
+	m.done = false
+	m.completedCount = 0
+
+	// In-place mode replaces each source with its own re-encode, so two selected
+	// sources that resolve to the same destination (e.g. clip.mov and clip.mp4
+	// under --format mp4) would race on one file and delete a source. There is no
+	// safe in-place disambiguation, so mark every member of a convergent group as
+	// an error and skip it; unaffected files still process normally.
+	m.markInPlaceCollisions()
 
 	m.totalToProcess = 0
 	for _, f := range m.files {
@@ -113,7 +190,10 @@ func (m model) handleOverwriteConfirm() (model, tea.Cmd) {
 
 	confirmed := m.currentIdx
 	var cmds []tea.Cmd
-	if m.processingCount < m.config.maxConcurrent &&
+	// Capacity is the in-flight count (m.cancels), and the confirmed file must not
+	// already be launched, mirroring fillSlots' guards.
+	_, alreadyInFlight := m.cancels[confirmed]
+	if len(m.cancels) < m.config.maxConcurrent && !alreadyInFlight &&
 		m.files[confirmed].selected && m.files[confirmed].status == statusPending {
 		cmds = append(cmds, m.startFile(confirmed))
 	}
@@ -157,7 +237,9 @@ func (m model) handleProcessingStart(msg processingStartMsg) (model, tea.Cmd) {
 		m.files[msg.idx].status = statusPending
 		m.files[msg.idx].progress = 0
 		m.files[msg.idx].outPath = "" // unstarted again; recompute next batch
-		if m.processingCount == 0 {
+		// cancels[msg.idx] was just deleted above; if nothing else is in flight the
+		// cancellation has fully drained.
+		if len(m.cancels) == 0 {
 			m.processing = false
 		}
 		return m, nil
@@ -233,6 +315,12 @@ func (m model) handleError(msg errorMsg) (model, tea.Cmd) {
 
 	if m.batchSettled() {
 		m.processing = false
+		if !m.userCancelled {
+			// Reach the same terminal state as a success-ending batch instead of
+			// silently dropping back into the editable picker when the last event
+			// of the batch happens to be an error (the footer reports the errors).
+			m.done = true
+		}
 	}
 	return m, nil
 }
@@ -322,6 +410,15 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (model, tea.Cmd) {
 func (m model) handleOverwritePromptKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
+		// Cancel every in-flight encode before quitting. The overwrite modal often
+		// appears while sibling files are still encoding; tea.Quit alone would tear
+		// down the TUI but leave those ffmpeg children running (they'd finish and
+		// write their outputs after we exit). Run() also cancels any survivors after
+		// program.Run() returns, but cancelling here kills them promptly.
+		m.userCancelled = true
+		for _, cancel := range m.cancels {
+			cancel()
+		}
 		return m, tea.Quit
 	case "up", "k":
 		if m.overwriteCursor > 0 {

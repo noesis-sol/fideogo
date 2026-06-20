@@ -1,6 +1,7 @@
 package fideogo
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,7 +22,7 @@ type videoMetadata struct {
 // probeMetadata fetches codec, dimensions, bitrate, and duration in a single
 // ffprobe invocation — spawn cost dominates ffprobe latency, so one call beats
 // three parallel ones.
-func (vs *videoService) probeMetadata(path string) (videoMetadata, error) {
+func (vs *videoService) probeMetadata(ctx context.Context, path string) (videoMetadata, error) {
 	if path == "" {
 		return videoMetadata{}, fmt.Errorf("path cannot be empty")
 	}
@@ -35,7 +36,9 @@ func (vs *videoService) probeMetadata(path string) (videoMetadata, error) {
 		"-of", "default=noprint_wrappers=1",
 		path,
 	}
-	out, err := exec.Command("ffprobe", args...).Output()
+	// CommandContext (not Command) so a user cancel during the probe phase aborts
+	// ffprobe immediately instead of leaving it running on a slow/large input.
+	out, err := exec.CommandContext(ctx, "ffprobe", args...).Output()
 	if err != nil {
 		return videoMetadata{}, fmt.Errorf("ffprobe failed: %w", err)
 	}
@@ -84,8 +87,8 @@ func (vs *videoService) formatVideoInfo(path string, meta videoMetadata) string 
 	return fmt.Sprintf("%sx%s | %s (%s) | %s | %s", meta.width, meta.height, format, meta.codec, bitrate, size)
 }
 
-func (vs *videoService) getVideoInfo(path string) string {
-	meta, err := vs.probeMetadata(path)
+func (vs *videoService) getVideoInfo(ctx context.Context, path string) string {
+	meta, err := vs.probeMetadata(ctx, path)
 	if err != nil || meta.width == "" || meta.height == "" {
 		return "unable to read video info"
 	}

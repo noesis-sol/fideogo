@@ -1,11 +1,13 @@
 package fideogo
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -54,23 +56,27 @@ func getInstallCommand() (osName, command string) {
 }
 
 func copyToClipboard(text string) error {
-	var cmd *exec.Cmd
+	// Bound the helper so a wedged clipboard tool (e.g. a stuck wl-copy/xclip)
+	// can't hang forever; copyCmd already runs this off the UI goroutine.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
+	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("pbcopy")
+		cmd = exec.CommandContext(ctx, "pbcopy")
 	case "linux":
 		if _, err := exec.LookPath("xclip"); err == nil {
-			cmd = exec.Command("xclip", "-selection", "clipboard")
+			cmd = exec.CommandContext(ctx, "xclip", "-selection", "clipboard")
 		} else if _, err := exec.LookPath("xsel"); err == nil {
-			cmd = exec.Command("xsel", "--clipboard", "--input")
+			cmd = exec.CommandContext(ctx, "xsel", "--clipboard", "--input")
 		} else if _, err := exec.LookPath("wl-copy"); err == nil {
-			cmd = exec.Command("wl-copy")
+			cmd = exec.CommandContext(ctx, "wl-copy")
 		} else {
 			return fmt.Errorf("no clipboard utility found (install xclip, xsel, or wl-copy)")
 		}
 	case "windows":
-		cmd = exec.Command("clip")
+		cmd = exec.CommandContext(ctx, "clip")
 	default:
 		return fmt.Errorf("clipboard not supported on this platform")
 	}
@@ -82,13 +88,14 @@ func copyToClipboard(text string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	// Always reap the child, even if the Write/Close below fails (e.g. the helper
+	// exits early and the pipe write returns EPIPE) — otherwise the started
+	// process is never Wait()ed and leaks as a zombie.
+	defer func() { _ = cmd.Wait() }()
 	if _, err := pipe.Write([]byte(text)); err != nil {
 		return err
 	}
-	if err := pipe.Close(); err != nil {
-		return err
-	}
-	return cmd.Wait()
+	return pipe.Close()
 }
 
 type errorModel struct {
@@ -105,19 +112,33 @@ func newErrorModel() errorModel {
 
 func (m errorModel) Init() tea.Cmd { return nil }
 
+// clipboardResultMsg carries the outcome of an async clipboard copy back to the
+// Update loop.
+type clipboardResultMsg struct{ err error }
+
+// copyCmd runs the (potentially slow, process-spawning) clipboard copy as a
+// tea.Cmd so it never blocks the Update goroutine, per Bubble Tea's contract.
+func copyCmd(command string) tea.Cmd {
+	return func() tea.Msg {
+		return clipboardResultMsg{err: copyToClipboard(command)}
+	}
+}
+
 func (m errorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case clipboardResultMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+		} else {
+			m.copied = true
+		}
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
 			return m, tea.Quit
 		case "c", "enter":
-			if err := copyToClipboard(m.command); err != nil {
-				m.err = err.Error()
-			} else {
-				m.copied = true
-			}
-			return m, nil
+			return m, copyCmd(m.command)
 		}
 	}
 	return m, nil

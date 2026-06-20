@@ -142,7 +142,14 @@ func (vs *videoService) ffmpegArgs(inputPath, outputPath string, meta videoMetad
 	args := decodeArgs(meta, runtime.GOOS)
 	args = append(args, "-i", inputPath)
 	args = append(args, p.video(vs.config)...)
-	args = append(args, "-vf", "scale=-2:'min("+vs.config.resolution+",ih)'")
+	// Force BOTH dimensions even: the -2 token only rounds width, while the height
+	// expression min(res,ih) passes an odd source height straight through when no
+	// downscale happens (ih <= res). libx264/yuv420p require even dimensions, so an
+	// odd height (e.g. a 640x405 source at the 1080 cap) would abort the encode with
+	// "height not divisible by 2". 2*trunc(.../2) rounds the target height down to
+	// the nearest even value (off by at most one pixel) and is harmless for the
+	// already-even and downscaled cases.
+	args = append(args, "-vf", "scale=-2:'2*trunc(min("+vs.config.resolution+",ih)/2)'")
 	args = append(args, p.audio(vs.config)...)
 	args = append(args, p.muxFlags...)
 	args = append(args, "-progress", "pipe:1", "-loglevel", "error", "-y", outputPath)
@@ -550,9 +557,23 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 	go func() {
 		defer cancel()
 
-		meta, err := vs.probeMetadata(path)
+		// reportFailure routes an early (pre-Wait) failure. If the context is
+		// already cancelled, the user aborted during the probe/start window, so
+		// emit a clean cancelMsg (matching the post-Wait path) instead of marking
+		// the file as a hard error with a confusing "context canceled" message.
+		// output is removed best-effort — a no-op if ffmpeg never created it.
+		reportFailure := func(err error) {
+			if ctx.Err() != nil {
+				_ = os.Remove(output)
+				program.Send(cancelMsg{idx: idx})
+				return
+			}
+			program.Send(errorMsg{idx: idx, err: err})
+		}
+
+		meta, err := vs.probeMetadata(ctx, path)
 		if err != nil {
-			program.Send(errorMsg{idx: idx, err: fmt.Errorf("failed to probe video: %w", err)})
+			reportFailure(fmt.Errorf("failed to probe video: %w", err))
 			return
 		}
 		if meta.width != "" && meta.height != "" {
@@ -565,17 +586,17 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			program.Send(errorMsg{idx: idx, err: fmt.Errorf("failed to create stdout pipe: %w", err)})
+			reportFailure(fmt.Errorf("failed to create stdout pipe: %w", err))
 			return
 		}
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
-			program.Send(errorMsg{idx: idx, err: fmt.Errorf("failed to create stderr pipe: %w", err)})
+			reportFailure(fmt.Errorf("failed to create stderr pipe: %w", err))
 			return
 		}
 
 		if err := cmd.Start(); err != nil {
-			program.Send(errorMsg{idx: idx, err: fmt.Errorf("failed to start ffmpeg: %w", err)})
+			reportFailure(fmt.Errorf("failed to start ffmpeg: %w", err))
 			return
 		}
 
@@ -614,6 +635,12 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 			if so := stderrBuf.String(); so != "" {
 				errMsg = fmt.Sprintf("%s\nDetails: %s", errMsg, strings.TrimSpace(so))
 			}
+			// A mid-encode failure (encoder error, disk full, …) leaves ffmpeg's
+			// partially-written output behind; discard it so a corrupt file isn't
+			// left next to the source (the cancel branch above does the same). For a
+			// non-in-place run this is the out_ file; in-place, the scratch temp.
+			// Never the source: output is always the freshly-written destination.
+			_ = os.Remove(output)
 			program.Send(errorMsg{idx: idx, err: fmt.Errorf("%s", errMsg)})
 			return
 		}
@@ -627,12 +654,16 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 				program.Send(errorMsg{idx: idx, err: fmt.Errorf("failed to replace original: %w", err)})
 				return
 			}
-			if finalDest != path {
+			// EqualFold, not !=: on a case-insensitive filesystem finalDest and path
+			// can be the same physical file under different spellings (clip.MP4 ->
+			// clip.mp4), and removing "path" there would delete the file we just
+			// wrote. Only drop the source when it is a genuinely distinct file.
+			if !strings.EqualFold(finalDest, path) {
 				_ = os.Remove(path)
 			}
 		}
 
-		if outInfo := vs.getVideoInfo(finalDest); outInfo != "" {
+		if outInfo := vs.getVideoInfo(ctx, finalDest); outInfo != "" {
 			program.Send(outputInfoMsg{idx: idx, info: outInfo})
 		}
 		program.Send(doneMsg{idx: idx})
