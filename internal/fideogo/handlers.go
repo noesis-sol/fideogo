@@ -37,7 +37,9 @@ func (m model) fillSlots(skipIdx int, cmds []tea.Cmd) (model, []tea.Cmd) {
 		if m.files[i].outPath == "" {
 			m.files[i].outPath = m.resolveOutputPath(i)
 		}
-		if pathExists(m.files[i].outPath) {
+		// In-place mode always overwrites by design, so skip the collision prompt —
+		// the source file (the destination) necessarily already exists.
+		if !m.config.inPlace && pathExists(m.files[i].outPath) {
 			if !m.showOverwritePrompt {
 				m.showOverwritePrompt = true
 				m.overwriteCursor = 0

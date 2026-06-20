@@ -34,6 +34,8 @@ Fideogo is a terminal user interface (TUI) application for compressing video fil
 - Batch compression of multiple files with bounded concurrency
 - Output format conversion (mp4/mov/mkv/webm) and size presets (`--size`)
 - Optional hardware-accelerated encoding (`--hw`: VideoToolbox/NVENC/QSV/AMF)
+- In-place replacement (`--overwrite`): replace each source with its compressed
+  result instead of writing an `out_`-prefixed copy
 - Overwrite prompt (overwrite / skip / cancel) with collision-safe output naming
 
 ## IMPORTANT: Build & Deploy Instructions for AI Agents
@@ -150,7 +152,12 @@ encode.go (`ffmpegArgs` / `profileFor`).
 - Concurrency: software encodes are thread-capped per job so parallel jobs don't
   thrash; hardware runs cap at 2 concurrent jobs
 - Output: written next to the source with an `out_` prefix, with collision-safe
-  naming within a batch
+  naming within a batch. With `--overwrite`, the source file is replaced in place
+  instead: ffmpeg encodes to a hidden `.…fideogo-tmp` scratch file next to the
+  destination, which is atomically renamed over the original on success (and the
+  original removed if `--format` changed its extension). The collision prompt is
+  skipped in this mode. A bare `--overwrite` keeps each file's own container; pair
+  it with `--format` to also convert.
 
 ## Rendering & Performance Notes
 

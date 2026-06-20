@@ -86,6 +86,11 @@ func findVideos(dir string) []videoFile {
 			continue
 		}
 
+		// Ignore scratch temps a crashed in-place encode may have left behind.
+		if strings.Contains(name, tempOutputMarker) {
+			continue
+		}
+
 		// Skip output files only if a corresponding source file exists.
 		if strings.HasPrefix(name, outputPrefix) {
 			sourceName := strings.TrimPrefix(name, outputPrefix)

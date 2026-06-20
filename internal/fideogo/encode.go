@@ -45,6 +45,40 @@ func getOutputPath(inputPath, outputFormat string) string {
 	return filepath.Join(dir, outputPrefix+base)
 }
 
+// tempOutputMarker tags the scratch files written during an in-place encode, so
+// findVideos can ignore any that a crash leaves behind.
+const tempOutputMarker = ".fideogo-tmp"
+
+// inPlaceDest returns the final destination for an in-place (--overwrite) encode:
+// the source file itself, with its extension swapped to outputFormat only when an
+// explicit --format was given. A plain --overwrite leaves outputFormat empty so
+// the file is recompressed in its own container rather than silently converted to
+// a different one (which would also delete the original under a new name).
+func inPlaceDest(inputPath, outputFormat string) string {
+	if outputFormat == "" {
+		return inputPath
+	}
+	ext := filepath.Ext(inputPath)
+	return strings.TrimSuffix(inputPath, ext) + "." + outputFormat
+}
+
+// tempOutputPath returns a hidden, batch-unique scratch path next to dest. ffmpeg
+// can't read and write the same file, so an in-place encode writes here and then
+// atomically renames over dest on success. The source's container is folded into
+// the name so two inputs resolving to the same dest (e.g. a.mov and a.mp4 both
+// under --format mp4) don't collide on one temp; dest's extension is preserved so
+// ffmpeg still infers the right muxer from the filename.
+func tempOutputPath(dest, source string) string {
+	dir := filepath.Dir(dest)
+	ext := filepath.Ext(dest)
+	stem := strings.TrimSuffix(filepath.Base(dest), ext)
+	srcTag := containerOf(source)
+	if srcTag == "" {
+		srcTag = "src"
+	}
+	return filepath.Join(dir, "."+stem+"."+srcTag+tempOutputMarker+ext)
+}
+
 // pathExists reports whether a file or directory exists at p.
 func pathExists(p string) bool {
 	_, err := os.Stat(p)
@@ -58,6 +92,11 @@ func pathExists(p string) bool {
 // same file. The first claimant keeps the natural name; later ones fold in the
 // source extension (out_a_mov.mp4), then a numeric suffix if still taken.
 func (m model) resolveOutputPath(idx int) string {
+	// In-place mode targets the source file itself (no out_ prefix, no
+	// disambiguation): each source is unique and the user opted into replacing it.
+	if m.config.inPlace {
+		return inPlaceDest(m.files[idx].path, m.config.outputFormat)
+	}
 	base := getOutputPath(m.files[idx].path, m.config.outputFormat)
 	// Compare case-insensitively: macOS (APFS/HFS+) and Windows treat paths that
 	// differ only in case as the SAME file, so two inputs whose stems differ only
@@ -492,10 +531,19 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 	}
 
 	path := m.files[idx].path
-	output := m.files[idx].outPath
-	if output == "" {
+	finalDest := m.files[idx].outPath
+	if finalDest == "" {
 		// Fallback: resolve directly if the slot filler didn't pre-assign one.
-		output = getOutputPath(path, m.config.outputFormat)
+		finalDest = m.resolveOutputPath(idx)
+	}
+
+	// In-place encodes can't write the destination directly (ffmpeg can't read and
+	// write one file), so they go to a scratch temp that is renamed over the source
+	// only after a clean encode. Non-in-place encodes write the out_ file directly.
+	inPlace := m.config.inPlace
+	output := finalDest
+	if inPlace {
+		output = tempOutputPath(finalDest, path)
 	}
 	vs := m.videoService
 
@@ -555,6 +603,7 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 			// Context cancellation = user cancel. Best-effort cleanup of the
 			// partial output; a cleanup failure must not be reported as a
 			// processing error, since the user explicitly asked to cancel.
+			// In-place runs remove the scratch temp here, never the source.
 			if ctx.Err() != nil {
 				_ = os.Remove(output)
 				program.Send(cancelMsg{idx: idx})
@@ -569,7 +618,21 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 			return
 		}
 
-		if outInfo := vs.getVideoInfo(output); outInfo != "" {
+		// In-place: atomically swap the freshly encoded temp over the destination,
+		// then drop the original source if a format change moved it to a new name
+		// (e.g. clip.mov -> clip.mp4) so the file is truly replaced, not duplicated.
+		if inPlace {
+			if err := os.Rename(output, finalDest); err != nil {
+				_ = os.Remove(output)
+				program.Send(errorMsg{idx: idx, err: fmt.Errorf("failed to replace original: %w", err)})
+				return
+			}
+			if finalDest != path {
+				_ = os.Remove(path)
+			}
+		}
+
+		if outInfo := vs.getVideoInfo(finalDest); outInfo != "" {
 			program.Send(outputInfoMsg{idx: idx, info: outInfo})
 		}
 		program.Send(doneMsg{idx: idx})

@@ -49,6 +49,7 @@ Options:
   --format <fmt>   Output format: mp4, mov, mkv, webm (default: mp4)
   --size <size>    Target size: sm/small (540p), md/medium (1080p), lg/large (2160p)
   --hw             Use hardware encoder (VideoToolbox/NVENC/QSV/AMF) — much faster
+  --overwrite      Replace each source file with its compressed result (no out_ prefix)
   --help, -h       Show this help message
 
 Examples:
@@ -61,12 +62,13 @@ Examples:
   fideogo --format mkv .        Convert to MKV format
   fideogo --size sm video.mp4   Compress to 540p
   fideogo --hw video.mov        Use hardware encoder
+  fideogo --overwrite video.mp4 Replace the original with the compressed file
 `
 
-// parseArgs extracts --format, --size, --hw flags and positional paths from args in any order.
-// Multiple positional paths are accepted so shell-expanded wildcards (e.g. */videos/*.mp4)
-// just work without quoting.
-func parseArgs(args []string) (format, size string, paths []string, hw bool) {
+// parseArgs extracts --format, --size, --hw, --overwrite flags and positional
+// paths from args in any order. Multiple positional paths are accepted so
+// shell-expanded wildcards (e.g. */videos/*.mp4) just work without quoting.
+func parseArgs(args []string) (format, size string, paths []string, hw, overwrite bool) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		flagName := strings.SplitN(arg, "=", 2)[0]
@@ -81,6 +83,8 @@ func parseArgs(args []string) (format, size string, paths []string, hw bool) {
 			i += skip
 		} else if arg == "--hw" || arg == "-hw" {
 			hw = true
+		} else if arg == "--overwrite" || arg == "-overwrite" {
+			overwrite = true
 		} else if arg == "--help" || arg == "-h" {
 			fmt.Print(usageText)
 			os.Exit(0)
@@ -171,17 +175,20 @@ func Run() {
 		os.Exit(1)
 	}
 
-	format, size, paths, hw := parseArgs(os.Args[1:])
-
-	// Default to mp4 rather than preserving the source container, so a WebM
-	// (or any) input isn't forced through the slow software VP9 encoder.
-	if format == "" {
-		format = defaultOutputFormat
-	}
+	format, size, paths, hw, overwrite := parseArgs(os.Args[1:])
 
 	if format != "" && !validFormats[format] {
 		fmt.Fprintf(os.Stderr, "Error: unsupported format %q\nSupported formats: mp4, mov, mkv, webm\n", format)
 		os.Exit(1)
+	}
+
+	// Default to mp4 rather than preserving the source container, so a WebM (or
+	// any) input isn't forced through the slow software VP9 encoder. In overwrite
+	// mode an unspecified --format instead means "keep each file's own container",
+	// so a plain --overwrite recompresses in place without converting the file (and
+	// deleting the original under a new extension).
+	if format == "" && !overwrite {
+		format = defaultOutputFormat
 	}
 
 	if hw && !profileFor(format).allowsHW {
@@ -219,6 +226,7 @@ func Run() {
 	}
 	m.config.outputFormat = format
 	m.config.hwAccel = hw
+	m.config.inPlace = overwrite
 	if hw {
 		encoder, err := resolveHWEncoder()
 		if err != nil {

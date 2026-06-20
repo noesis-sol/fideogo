@@ -14,6 +14,7 @@ type compressionConfig struct {
 	hwAccel       bool   // use hardware encoder
 	hwEncoder     string // resolved hw encoder (h264_videotoolbox/nvenc/qsv/amf)
 	hwQuality     string // -q:v value for h264_videotoolbox (0-100, higher = better)
+	inPlace       bool   // replace each source file with its compressed result
 }
 
 const outputPrefix = "out_"
