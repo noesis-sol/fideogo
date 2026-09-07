@@ -55,7 +55,7 @@ func TestEncodeIntegration(t *testing.T) {
 	out := filepath.Join(dir, "out.mp4")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if b, err := vs.buildFFmpegCommand(ctx, src, out, meta).CombinedOutput(); err != nil {
+	if b, err := vs.buildFFmpegCommand(ctx, src, out, meta, 1).CombinedOutput(); err != nil {
 		t.Fatalf("encode failed: %v\n%s", err, b)
 	}
 

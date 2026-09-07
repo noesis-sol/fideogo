@@ -3,6 +3,7 @@ package fideogo
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -20,10 +22,37 @@ import (
 // videoService encapsulates video processing operations.
 type videoService struct {
 	config compressionConfig
+	// workers tracks the per-file worker goroutines so Run() can wait for their
+	// cleanup (partial-output removal) after the UI has closed; see waitWorkers.
+	workers sync.WaitGroup
 }
 
 func newVideoService(config compressionConfig) *videoService {
 	return &videoService{config: config}
+}
+
+// workerDrainTimeout bounds how long Run() waits for workers after the UI
+// closes. ffmpeg dies within milliseconds of its context being cancelled, so
+// this only matters if something is wedged — the wait must never hold a quit.
+const workerDrainTimeout = 3 * time.Second
+
+// waitWorkers blocks until every worker goroutine has exited, or timeout
+// elapses, and reports which. A worker removes its truncated out_ file or
+// scratch temp only after ffmpeg has died, so a process that exited the moment
+// the UI closed would leave those partial files behind on every SIGINT/SIGTERM
+// or ctrl+c-from-the-overwrite-prompt quit.
+func (vs *videoService) waitWorkers(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		vs.workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // timeRegex extracts the microsecond timestamp from ffmpeg's -progress output.
@@ -135,13 +164,19 @@ func containerOf(outputPath string) string {
 // ffmpegArgs assembles the full ffmpeg argument list for one encode. It is a
 // pure function of its inputs (no exec, no process), so the command can be
 // unit-tested in isolation; buildFFmpegCommand only wraps it in an *exec.Cmd.
-func (vs *videoService) ffmpegArgs(inputPath, outputPath string, meta videoMetadata) []string {
+func (vs *videoService) ffmpegArgs(inputPath, outputPath string, meta videoMetadata, jobs int) []string {
 	p := profileFor(containerOf(outputPath))
+
+	// Software encoders split the cores across the encodes that actually run
+	// side by side (jobs), not the configured ceiling: a lone file on a 16-core
+	// machine would otherwise be held to NumCPU/maxConcurrent threads while the
+	// rest of the CPU idles.
+	threads := autoThreadsPerJob(concurrentJobs(vs.config.maxConcurrent, jobs))
 
 	// Hardware-accelerated decode flags must precede -i to apply to the input.
 	args := decodeArgs(meta, runtime.GOOS)
 	args = append(args, "-i", inputPath)
-	args = append(args, p.video(vs.config)...)
+	args = append(args, p.video(vs.config, threads)...)
 	// Force BOTH dimensions even: the -2 token only rounds width, while the height
 	// expression min(res,ih) passes an odd source height straight through when no
 	// downscale happens (ih <= res). libx264/yuv420p require even dimensions, so an
@@ -150,14 +185,20 @@ func (vs *videoService) ffmpegArgs(inputPath, outputPath string, meta videoMetad
 	// the nearest even value (off by at most one pixel) and is harmless for the
 	// already-even and downscaled cases.
 	args = append(args, "-vf", "scale=-2:'2*trunc(min("+vs.config.resolution+",ih)/2)'")
+	// Force 8-bit 4:2:0 output. Left to the source's pixel format, a 10-bit HDR
+	// phone clip or a 4:2:2 ProRes/screen recording makes libx264 emit High 10 /
+	// High 4:2:2 profiles that QuickTime, browsers, and hardware decoders often
+	// refuse; yuv420p is what every H.264/VP9 decoder handles. Hardware encoders
+	// that want nv12 accept it too — ffmpeg converts on the way in.
+	args = append(args, "-pix_fmt", "yuv420p")
 	args = append(args, p.audio(vs.config)...)
 	args = append(args, p.muxFlags...)
 	args = append(args, "-progress", "pipe:1", "-loglevel", "error", "-y", outputPath)
 	return args
 }
 
-func (vs *videoService) buildFFmpegCommand(ctx context.Context, inputPath, outputPath string, meta videoMetadata) *exec.Cmd {
-	return exec.CommandContext(ctx, "ffmpeg", vs.ffmpegArgs(inputPath, outputPath, meta)...)
+func (vs *videoService) buildFFmpegCommand(ctx context.Context, inputPath, outputPath string, meta videoMetadata, jobs int) *exec.Cmd {
+	return exec.CommandContext(ctx, "ffmpeg", vs.ffmpegArgs(inputPath, outputPath, meta, jobs)...)
 }
 
 // heavyDecodeCodecs are modern codecs whose software decode is CPU-expensive
@@ -413,7 +454,7 @@ func hwEncoderArgs(c compressionConfig) []string {
 // Consolidating these here keeps per-container decisions from scattering across
 // the codec helpers, the command builder, and CLI validation.
 type containerProfile struct {
-	video    func(c compressionConfig) []string
+	video    func(c compressionConfig, threads int) []string
 	audio    func(c compressionConfig) []string
 	muxFlags []string
 	allowsHW bool
@@ -441,26 +482,26 @@ func profileFor(container string) containerProfile {
 }
 
 // h264Video returns the H.264 video arguments, preferring the resolved hardware
-// encoder when hardware acceleration is enabled. Software encoding caps CPU
-// threads per job so concurrent ffmpegs don't thrash; HW encoders skip the cap
-// since they offload to the media engine.
-func h264Video(c compressionConfig) []string {
+// encoder when hardware acceleration is enabled. Software encoding is capped at
+// threads CPU threads (the batch's per-job budget) so concurrent ffmpegs don't
+// thrash; HW encoders skip the cap since they offload to the media engine.
+func h264Video(c compressionConfig, threads int) []string {
 	if c.hwAccel {
 		return hwEncoderArgs(c)
 	}
 	return []string{
 		"-c:v", c.codec, "-preset", c.preset, "-crf", c.crf,
-		"-threads", strconv.Itoa(autoThreadsPerJob(c.maxConcurrent)),
+		"-threads", strconv.Itoa(threads),
 	}
 }
 
 // vp9Video returns libvpx-vp9 arguments in constant-quality mode (-b:v 0 hands
-// rate control to -crf). row-mt plus a per-job thread cap keep concurrent
+// rate control to -crf). row-mt plus the per-job thread cap keep concurrent
 // software encodes from thrashing.
-func vp9Video(c compressionConfig) []string {
+func vp9Video(c compressionConfig, threads int) []string {
 	return []string{
 		"-c:v", "libvpx-vp9", "-crf", c.crf, "-b:v", "0", "-row-mt", "1",
-		"-threads", strconv.Itoa(autoThreadsPerJob(c.maxConcurrent)),
+		"-threads", strconv.Itoa(threads),
 	}
 }
 
@@ -473,27 +514,34 @@ func opusAudio(c compressionConfig) []string {
 }
 
 // streamProgress reads ffmpeg's -progress stream on stdout and forwards percent
-// updates for file idx. It coalesces to at most one message per whole percent:
-// ffmpeg emits progress blocks many times a second, the UI only shows an integer
-// percent over a 40-cell bar, and every forwarded message rebuilds the whole
-// View across all concurrent files. stdout is drained even when duration is
-// unknown (a full pipe would block ffmpeg); without a duration no percent can be
-// computed, so the spinner conveys activity instead.
-func streamProgress(stdout io.Reader, idx int, duration float64) {
+// updates for file idx through send. It coalesces to at most one message per
+// whole percent: ffmpeg emits progress blocks many times a second, the UI only
+// shows an integer percent over a 40-cell bar, and every forwarded message
+// rebuilds the whole View across all concurrent files.
+//
+// Whatever happens, stdout is read to EOF: a pipe that stops being read fills
+// up and blocks ffmpeg, so the encode would hang at its last reported percent.
+// That is why lines come from bufio.Reader.ReadLine (an over-long line arrives
+// as harmless fragments) rather than bufio.Scanner, which gives up — and stops
+// reading — at its token limit; and why the no-duration case (no percent is
+// computable; the spinner conveys activity instead) still drains the pipe.
+func streamProgress(stdout io.Reader, idx int, duration float64, send func(tea.Msg)) {
+	defer func() { _, _ = io.Copy(io.Discard, stdout) }()
 	if duration <= 0 {
-		// No percent is computable without a duration, but stdout must still be
-		// drained or ffmpeg blocks on a full pipe.
-		_, _ = io.Copy(io.Discard, stdout)
 		return
 	}
-	scanner := bufio.NewScanner(stdout)
+	br := bufio.NewReaderSize(stdout, 64<<10)
 	lastPct := -1
-	for scanner.Scan() {
-		matches := timeRegex.FindStringSubmatch(scanner.Text())
+	for {
+		line, _, err := br.ReadLine()
+		if err != nil {
+			return
+		}
+		matches := timeRegex.FindSubmatch(line)
 		if len(matches) <= 1 {
 			continue
 		}
-		timeUs, err := strconv.ParseInt(matches[1], 10, 64)
+		timeUs, err := strconv.ParseInt(string(matches[1]), 10, 64)
 		if err != nil {
 			continue
 		}
@@ -506,30 +554,56 @@ func streamProgress(stdout io.Reader, idx int, duration float64) {
 			continue
 		}
 		lastPct = pct
-		program.Send(progressMsg{idx: idx, progress: prog})
+		send(progressMsg{idx: idx, progress: prog})
 	}
 }
 
-// drainStderr accumulates ffmpeg's stderr into buf so a failed encode can report
-// the underlying error; draining also keeps the pipe from filling and blocking
-// ffmpeg.
-func drainStderr(stderr io.Reader, buf *strings.Builder) {
-	sc := bufio.NewScanner(stderr)
-	for sc.Scan() {
-		buf.WriteString(sc.Text())
-		buf.WriteString("\n")
+// stderrTailBytes bounds how much of ffmpeg's stderr is retained for the error
+// report. The pipe itself is always drained to EOF (a full pipe would block
+// ffmpeg); only what is kept is capped, and it is the tail that is kept because
+// ffmpeg prints the decisive error last.
+const stderrTailBytes = 64 << 10
+
+// tailWriter retains the last keep bytes written through it.
+type tailWriter struct {
+	keep int
+	buf  []byte
+}
+
+func (w *tailWriter) Write(p []byte) (int, error) {
+	if len(p) >= w.keep {
+		w.buf = append(w.buf[:0], p[len(p)-w.keep:]...)
+		return len(p), nil
 	}
+	if drop := len(w.buf) + len(p) - w.keep; drop > 0 {
+		w.buf = append(w.buf[:0], w.buf[drop:]...)
+	}
+	w.buf = append(w.buf, p...)
+	return len(p), nil
+}
+
+// drainStderr reads ffmpeg's stderr to EOF — keeping the pipe from filling and
+// blocking ffmpeg — and returns the retained tail so a failed encode can report
+// the underlying error. It deliberately avoids bufio.Scanner: one line longer
+// than the scanner's limit would make it stop reading, and the stalled pipe
+// would then hang the encode.
+func drainStderr(stderr io.Reader) string {
+	w := &tailWriter{keep: stderrTailBytes}
+	_, _ = io.Copy(w, stderr)
+	return string(w.buf)
 }
 
 // processFile spawns a worker goroutine that probes the input, runs ffmpeg, and
 // streams progress/done/error/cancel messages back to the Bubble Tea program.
 // The worker holds no reference to the model — only the snapshotted path,
-// resolved output path, videoService, and the caller-owned cancel context.
+// resolved output path, videoService, and the caller-owned cancel context. jobs
+// is how many encodes run side by side from this point in the batch; it sizes
+// the software encoder's thread budget.
 //
 // processFile is a read-only value-receiver method: the caller is responsible
 // for creating the cancel context and registering it in m.cancels before
 // invocation. This keeps state mutation out of a Cmd-returning method.
-func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFunc) tea.Cmd {
+func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFunc, jobs int) tea.Cmd {
 	if idx < 0 || idx >= len(m.files) {
 		cancel()
 		return func() tea.Msg {
@@ -554,7 +628,9 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 	}
 	vs := m.videoService
 
+	vs.workers.Add(1)
 	go func() {
+		defer vs.workers.Done()
 		defer cancel()
 
 		// reportFailure routes an early (pre-Wait) failure. If the context is
@@ -576,13 +652,9 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 			reportFailure(fmt.Errorf("failed to probe video: %w", err))
 			return
 		}
-		if meta.width != "" && meta.height != "" {
-			program.Send(videoInfoMsg{idx: idx, info: vs.formatVideoInfo(path, meta)})
-		}
+		program.Send(videoInfoMsg{idx: idx, info: vs.formatVideoInfo(path, meta)})
 
-		duration := meta.duration
-
-		cmd := vs.buildFFmpegCommand(ctx, path, output, meta)
+		cmd := vs.buildFFmpegCommand(ctx, path, output, meta, jobs)
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
@@ -602,23 +674,27 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 
 		program.Send(processingStartMsg{idx: idx})
 
-		var stderrBuf strings.Builder
-
 		progressDone := make(chan struct{})
 		go func() {
 			defer close(progressDone)
-			streamProgress(stdout, idx, duration)
+			streamProgress(stdout, idx, meta.duration, program.Send)
 		}()
 
+		var stderrTail string
 		stderrDone := make(chan struct{})
 		go func() {
 			defer close(stderrDone)
-			drainStderr(stderr, &stderrBuf)
+			stderrTail = drainStderr(stderr)
 		}()
 
-		waitErr := cmd.Wait()
+		// Both pipes must reach EOF before Wait: Wait closes the parent's read
+		// ends the moment the process exits, so calling it while a reader is still
+		// mid-read can drop the tail of stderr — the very line that explains a
+		// failure (os/exec documents this ordering). EOF arrives when ffmpeg exits
+		// or is killed on cancel, so waiting for the readers first cannot deadlock.
 		<-progressDone
 		<-stderrDone
+		waitErr := cmd.Wait()
 
 		if waitErr != nil {
 			// Context cancellation = user cancel. Best-effort cleanup of the
@@ -632,8 +708,8 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 			}
 
 			errMsg := fmt.Sprintf("ffmpeg failed: %v", waitErr)
-			if so := stderrBuf.String(); so != "" {
-				errMsg = fmt.Sprintf("%s\nDetails: %s", errMsg, strings.TrimSpace(so))
+			if detail := lastLine(stderrTail); detail != "" {
+				errMsg = fmt.Sprintf("%s: %s", errMsg, detail)
 			}
 			// A mid-encode failure (encoder error, disk full, …) leaves ffmpeg's
 			// partially-written output behind; discard it so a corrupt file isn't
@@ -641,7 +717,7 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 			// non-in-place run this is the out_ file; in-place, the scratch temp.
 			// Never the source: output is always the freshly-written destination.
 			_ = os.Remove(output)
-			program.Send(errorMsg{idx: idx, err: fmt.Errorf("%s", errMsg)})
+			program.Send(errorMsg{idx: idx, err: errors.New(errMsg)})
 			return
 		}
 
@@ -663,9 +739,7 @@ func (m model) processFile(idx int, ctx context.Context, cancel context.CancelFu
 			}
 		}
 
-		if outInfo := vs.getVideoInfo(ctx, finalDest); outInfo != "" {
-			program.Send(outputInfoMsg{idx: idx, info: outInfo})
-		}
+		program.Send(outputInfoMsg{idx: idx, info: vs.getVideoInfo(ctx, finalDest)})
 		program.Send(doneMsg{idx: idx})
 	}()
 

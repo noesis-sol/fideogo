@@ -14,9 +14,28 @@ import (
 // keeps the invariant "an in-flight file is always in m.cancels" structural —
 // the cancellation paths (handleDone/Error/Cancel, cancelAll) all rely on it.
 func (m model) startFile(idx int) tea.Cmd {
+	jobs := m.batchJobs()
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancels[idx] = cancel
-	return m.processFile(idx, ctx, cancel)
+	return m.processFile(idx, ctx, cancel, jobs)
+}
+
+// batchJobs is how many encodes will run side by side from this point in the
+// batch — everything already in flight plus what is still queued, capped at
+// maxConcurrent — and sizes the software thread budget of the file being
+// started. A lone file, or a batch smaller than the cap, thereby gets the cores
+// it can actually use instead of a share reserved for jobs that never come.
+func (m model) batchJobs() int {
+	queued := len(m.cancels)
+	for i := range m.files {
+		if _, inFlight := m.cancels[i]; inFlight {
+			continue
+		}
+		if m.files[i].selected && m.files[i].status == statusPending {
+			queued++
+		}
+	}
+	return concurrentJobs(m.config.maxConcurrent, queued)
 }
 
 // fillSlots walks selected+unstarted files (skipping skipIdx, pass -1 for none),
@@ -230,17 +249,15 @@ func (m model) handleOverwriteSkip() (model, tea.Cmd) {
 
 func (m model) handleProcessingStart(msg processingStartMsg) (model, tea.Cmd) {
 	if m.userCancelled {
+		// The user cancelled while this worker was still starting up. Its context
+		// is already cancelled (the 'c' handler did that), so ffmpeg is dying and
+		// the worker will report back with a cancelMsg — and THAT is what releases
+		// its m.cancels slot, resets the row, and settles the batch. Releasing the
+		// slot here instead once declared the batch drained early, let the user
+		// restart, and had the late cancelMsg then delete the *new* worker's
+		// cancel func, orphaning an encode nothing could stop.
 		if cancel, ok := m.cancels[msg.idx]; ok {
 			cancel()
-			delete(m.cancels, msg.idx)
-		}
-		m.files[msg.idx].status = statusPending
-		m.files[msg.idx].progress = 0
-		m.files[msg.idx].outPath = "" // unstarted again; recompute next batch
-		// cancels[msg.idx] was just deleted above; if nothing else is in flight the
-		// cancellation has fully drained.
-		if len(m.cancels) == 0 {
-			m.processing = false
 		}
 		return m, nil
 	}
@@ -352,7 +369,8 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m.handleOverwritePromptKey(msg)
 	}
 
-	switch msg.String() {
+	key := msg.String()
+	switch key {
 	case "ctrl+c", "c":
 		if m.processing {
 			m.userCancelled = true
@@ -361,7 +379,7 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if msg.String() == "ctrl+c" {
+		if key == "ctrl+c" {
 			return m, tea.Quit
 		}
 	case "q", "esc":
@@ -369,21 +387,32 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, tea.Quit
 		}
 	}
-	if m.processing {
-		return m, nil
-	}
 	if len(m.files) == 0 {
 		return m, nil
 	}
-	switch msg.String() {
+
+	// Navigation works in every state — mid-batch too, where a long list still
+	// has to be scrolled to see which rows have finished — while selection and
+	// start are only accepted when idle.
+	last := len(m.files) - 1
+	switch key {
 	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-		}
+		m.cursor = max(0, m.cursor-1)
 	case "down", "j":
-		if m.cursor < len(m.files)-1 {
-			m.cursor++
-		}
+		m.cursor = min(last, m.cursor+1)
+	case "pgup":
+		m.cursor = max(0, m.cursor-m.pageRows())
+	case "pgdown":
+		m.cursor = min(last, m.cursor+m.pageRows())
+	case "home", "g":
+		m.cursor = 0
+	case "end", "G":
+		m.cursor = last
+	}
+	if m.processing {
+		return m, nil
+	}
+	switch key {
 	case " ":
 		m.files[m.cursor].selected = !m.files[m.cursor].selected
 		if m.files[m.cursor].status == statusPending {
@@ -398,9 +427,11 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (model, tea.Cmd) {
 				m.files[i].selected = true
 			}
 		}
-		return m, m.startProcessing()
+		cmd := m.startProcessing()
+		return m, cmd
 	case "enter":
-		return m, m.startProcessing()
+		cmd := m.startProcessing()
+		return m, cmd
 	}
 	return m, nil
 }

@@ -5,7 +5,7 @@
 #   docker build -f Dockerfile.test -t fideogo-test .
 #   docker run --rm fideogo-test
 #
-FROM golang:1.24-bookworm
+FROM golang:1.27-bookworm
 
 # ffmpeg + ffprobe for the integration tests; software encoders only (no GPU).
 RUN apt-get update \

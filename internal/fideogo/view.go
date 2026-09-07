@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/lucasb-eyer/go-colorful"
 )
 
@@ -19,6 +20,14 @@ const (
 	doneMark         = " ✓"
 	errorMark        = " ✗"
 	detailIndent     = "    " // leading pad for In:/Out:/Error: detail lines
+
+	// rowReserved is the width a file row spends around its name: the cursor
+	// (2), the glyph (1) and a space before it, and the ✓/✗ mark (2) after it.
+	rowReserved = 6
+
+	// chromeLines are the fixed lines around the file list: the title, the
+	// status header, the blank line before the footer, and the footer.
+	chromeLines = 4
 )
 
 var (
@@ -112,15 +121,14 @@ func (m model) View() string {
 		return s.String()
 	}
 
-	for i, f := range m.files {
-		m.renderFileRow(&s, i, f)
-	}
+	m.renderFileList(&s)
 
 	s.WriteString("\n")
 	m.renderFooter(&s)
 
 	if m.showOverwritePrompt {
-		m.renderOverwriteDialog(&s)
+		s.WriteString("\n\n")
+		s.WriteString(m.renderOverwriteDialog())
 	}
 
 	return s.String()
@@ -134,6 +142,176 @@ func (m model) renderStatusHeader(s *strings.Builder) {
 	statusLine := fmt.Sprintf("Processing %d of %d files (%d completed)",
 		m.processingCount, m.totalToProcess, m.completedCount)
 	s.WriteString(infoStyle.Render(statusLine))
+}
+
+// renderFileList writes the rows that fit the terminal — a window around the
+// cursor (see viewport) — with "N more" markers where rows are clipped above or
+// below, so a long directory stays navigable instead of having Bubble Tea's
+// inline renderer silently drop the top of the frame.
+func (m model) renderFileList(s *strings.Builder) {
+	start, end := m.viewport()
+	if start > 0 {
+		s.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more", start)))
+		s.WriteString("\n")
+	}
+	for i := start; i < end; i++ {
+		m.renderFileRow(s, i, m.files[i])
+	}
+	if end < len(m.files) {
+		s.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more", len(m.files)-end)))
+		s.WriteString("\n")
+	}
+}
+
+// viewport is the [start, end) range of file rows View draws.
+func (m model) viewport() (start, end int) {
+	return viewport(m.rowLineCounts(), m.cursor, m.offset, m.rowBudget())
+}
+
+// scrollOffset is the first visible row once the cursor has been kept in view;
+// Update stores it back into m.offset after every message so scrolling is
+// incremental rather than recomputed from scratch.
+func (m model) scrollOffset() int {
+	start, _ := m.viewport()
+	return start
+}
+
+// pageRows is how many rows a PgUp/PgDn keystroke moves: the rows currently on
+// screen, or a modest default before the terminal size is known.
+func (m model) pageRows() int {
+	if m.height <= 0 {
+		return 10
+	}
+	start, end := m.viewport()
+	return max(1, end-start)
+}
+
+// rowBudget is how many terminal lines the file list may occupy, or 0 when the
+// terminal size is unknown (nothing is clipped then). The overwrite dialog,
+// when shown, sits below the footer and takes its lines out of the same budget.
+func (m model) rowBudget() int {
+	if m.height <= 0 {
+		return 0
+	}
+	extra := 0
+	if m.showOverwritePrompt {
+		extra = 1 + lipgloss.Height(m.renderOverwriteDialog()) // blank line + box
+	}
+	return max(1, m.height-chromeLines-extra)
+}
+
+// rowLineCounts returns the number of terminal lines each file row renders to.
+func (m model) rowLineCounts() []int {
+	lines := make([]int, len(m.files))
+	for i, f := range m.files {
+		lines[i] = rowLines(f)
+	}
+	return lines
+}
+
+// rowLines is the number of lines renderFileRow emits for f. It must mirror
+// renderFileRow exactly — detail lines are truncated rather than wrapped, so
+// the count is reliable — because the viewport uses it to decide what fits
+// without rendering every row.
+func rowLines(f videoFile) int {
+	n := 1
+	switch f.status {
+	case statusProcessing:
+		n++ // progress bar
+		if f.info != "" {
+			n++
+		}
+	case statusDone:
+		if f.info != "" {
+			n++
+		}
+		if f.outInfo != "" {
+			n++
+		}
+	case statusError:
+		if f.err != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// viewport picks the half-open row range [start, end) to draw so that the rows
+// fit in budget lines (budget <= 0 means unlimited) and the cursor is visible.
+// offset is the preferred first row — the current scroll position — and is
+// moved only as far as needed to bring the cursor into view, so the list
+// scrolls a row at a time instead of jumping. One line is reserved at each
+// clipped edge for its "more" marker, so the whole frame still fits.
+func viewport(lines []int, cursor, offset, budget int) (start, end int) {
+	n := len(lines)
+	if n == 0 {
+		return 0, 0
+	}
+	if budget <= 0 || sumInts(lines) <= budget {
+		return 0, n
+	}
+	cursor = max(0, min(cursor, n-1))
+	offset = max(0, min(offset, cursor)) // never start below the cursor
+
+	end = extendDown(lines, offset, budget)
+	if cursor >= end {
+		// The cursor fell below the window: pin the bottom edge to it.
+		end = cursor + 1
+		return extendUp(lines, end, budget), end
+	}
+	if end == n {
+		// The window reaches the last row: pull the top edge up to use any
+		// spare lines rather than leave them blank.
+		offset = min(offset, extendUp(lines, n, budget))
+	}
+	return offset, end
+}
+
+// extendDown returns the largest end such that rows [start, end) plus their
+// edge markers fit in budget; always at least one row.
+func extendDown(lines []int, start, budget int) int {
+	n := len(lines)
+	used, end := 0, start
+	for end < n {
+		reserve := btoi(start > 0) + btoi(end+1 < n)
+		if used+lines[end]+reserve > budget {
+			break
+		}
+		used += lines[end]
+		end++
+	}
+	return max(end, start+1)
+}
+
+// extendUp returns the smallest start such that rows [start, end) plus their
+// edge markers fit in budget; always at least one row.
+func extendUp(lines []int, end, budget int) int {
+	n := len(lines)
+	used, start := 0, end
+	for start > 0 {
+		reserve := btoi(end < n) + btoi(start-1 > 0)
+		if used+lines[start-1]+reserve > budget {
+			break
+		}
+		used += lines[start-1]
+		start--
+	}
+	return min(start, end-1)
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func sumInts(xs []int) int {
+	total := 0
+	for _, x := range xs {
+		total += x
+	}
+	return total
 }
 
 // fileGlyph picks a row's leading indicator. While a batch runs, a selected file
@@ -157,10 +335,12 @@ func (m model) fileGlyph(f videoFile) (glyph string, style lipgloss.Style, spin 
 
 // renderFileRow writes one file's line: cursor, status glyph/spinner, name, and
 // the status-specific detail beneath it (progress, input/output info, or error).
+// The name and every detail line are truncated to the terminal width so a row
+// never wraps; rowLines depends on that.
 func (m model) renderFileRow(s *strings.Builder, i int, f videoFile) {
 	cursor := cursorInactive
 	rowStyle := normalStyle
-	if i == m.cursor && !m.processing {
+	if i == m.cursor {
 		cursor = cursorActive
 		rowStyle = selectedStyle
 	}
@@ -172,7 +352,7 @@ func (m model) renderFileRow(s *strings.Builder, i int, f videoFile) {
 	} else {
 		s.WriteString(glyphStyle.Render(glyph))
 	}
-	s.WriteString(rowStyle.Render(" " + f.name))
+	s.WriteString(rowStyle.Render(" " + m.fit(f.name, rowReserved)))
 
 	switch f.status {
 	case statusProcessing:
@@ -180,18 +360,15 @@ func (m model) renderFileRow(s *strings.Builder, i int, f videoFile) {
 	case statusDone:
 		s.WriteString(successStyle.Render(doneMark))
 		if f.info != "" {
-			s.WriteString("\n" + detailIndent)
-			s.WriteString(normalStyle.Render("In:  " + f.info))
+			m.writeDetail(s, normalStyle, "In:  "+f.info)
 		}
 		if f.outInfo != "" {
-			s.WriteString("\n" + detailIndent)
-			s.WriteString(successStyle.Render("Out: " + f.outInfo))
+			m.writeDetail(s, successStyle, "Out: "+f.outInfo)
 		}
 	case statusError:
 		s.WriteString(errorStyle.Render(errorMark))
 		if f.err != nil {
-			s.WriteString("\n" + detailIndent)
-			s.WriteString(errorStyle.Render("Error: " + f.err.Error()))
+			m.writeDetail(s, errorStyle, "Error: "+oneLine(f.err.Error()))
 		}
 	}
 
@@ -214,9 +391,31 @@ func (m model) renderProgress(s *strings.Builder, f videoFile) {
 	s.WriteString(percentStyles[pct].Render(percentLabels[pct]))
 
 	if f.info != "" {
-		s.WriteString("\n" + detailIndent)
-		s.WriteString(infoStyle.Render("In:  " + f.info))
+		m.writeDetail(s, infoStyle, "In:  "+f.info)
 	}
+}
+
+// writeDetail writes one indented detail line beneath a row, truncated to the
+// terminal width so it can never wrap — a wrapped line would break the
+// viewport's row accounting and corrupt the frame.
+func (m model) writeDetail(s *strings.Builder, style lipgloss.Style, text string) {
+	s.WriteString("\n" + detailIndent)
+	s.WriteString(style.Render(m.fit(text, len(detailIndent))))
+}
+
+// fit truncates text with an ellipsis to the terminal width minus reserved
+// cells; a no-op until the terminal size is known.
+func (m model) fit(text string, reserved int) string {
+	if m.width <= 0 {
+		return text
+	}
+	return ansi.Truncate(text, max(1, m.width-reserved), "…")
+}
+
+// oneLine collapses an error's whitespace (including embedded newlines) so it
+// renders on a single detail line.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // anyErrors reports whether any file in the batch ended in the error state. Used
@@ -249,9 +448,9 @@ func (m model) renderFooter(s *strings.Builder) {
 	}
 }
 
-// renderOverwriteDialog writes the modal shown when an output file already exists.
-func (m model) renderOverwriteDialog(s *strings.Builder) {
-	s.WriteString("\n\n")
+// renderOverwriteDialog returns the modal shown when an output file already
+// exists. It is returned rather than written so rowBudget can measure it.
+func (m model) renderOverwriteDialog() string {
 	var dialog strings.Builder
 
 	dialog.WriteString(dialogTitleStyle.Render("⚠️  File Already Exists"))
@@ -278,5 +477,5 @@ func (m model) renderOverwriteDialog(s *strings.Builder) {
 	dialog.WriteString("\n")
 	dialog.WriteString(helpTextStyle.Render(keyStyle.Render("↑/↓") + " navigate • " + keyStyle.Render("enter") + " select"))
 
-	s.WriteString(dialogBoxStyle.Render(dialog.String()))
+	return dialogBoxStyle.Render(dialog.String())
 }

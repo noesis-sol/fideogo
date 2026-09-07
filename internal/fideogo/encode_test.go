@@ -123,7 +123,7 @@ func TestFFmpegArgs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			vs := newVideoService(tt.config)
 			// Light source (h264/1080p) so decode hwaccel is not added here.
-			args := vs.ffmpegArgs("input.mov", tt.out, videoMetadata{codec: "h264", height: "1080"})
+			args := vs.ffmpegArgs("input.mov", tt.out, videoMetadata{codec: "h264", height: "1080"}, tt.config.maxConcurrent)
 
 			if len(args) == 0 || args[len(args)-1] != tt.out {
 				t.Fatalf("output path must be last arg; got %v", args)
@@ -177,6 +177,7 @@ func TestFFmpegArgsGolden(t *testing.T) {
 				"-i", "input.mov",
 				"-c:v", "libx264", "-preset", "medium", "-crf", "28", "-threads", threads,
 				"-vf", "scale=-2:'2*trunc(min(1080,ih)/2)'",
+				"-pix_fmt", "yuv420p",
 				"-c:a", "aac", "-b:a", "96k",
 				"-movflags", "+faststart",
 				"-progress", "pipe:1", "-loglevel", "error", "-y", "out_video.mp4",
@@ -190,6 +191,7 @@ func TestFFmpegArgsGolden(t *testing.T) {
 				"-i", "input.mov",
 				"-c:v", "libx264", "-preset", "medium", "-crf", "28", "-threads", threads,
 				"-vf", "scale=-2:'2*trunc(min(1080,ih)/2)'",
+				"-pix_fmt", "yuv420p",
 				"-c:a", "aac", "-b:a", "96k",
 				"-movflags", "+faststart",
 				"-progress", "pipe:1", "-loglevel", "error", "-y", "out_video.mov",
@@ -203,6 +205,7 @@ func TestFFmpegArgsGolden(t *testing.T) {
 				"-i", "input.mov",
 				"-c:v", "libx264", "-preset", "medium", "-crf", "28", "-threads", threads,
 				"-vf", "scale=-2:'2*trunc(min(1080,ih)/2)'",
+				"-pix_fmt", "yuv420p",
 				"-c:a", "aac", "-b:a", "96k",
 				"-progress", "pipe:1", "-loglevel", "error", "-y", "out_video.mkv",
 			},
@@ -215,6 +218,7 @@ func TestFFmpegArgsGolden(t *testing.T) {
 				"-i", "input.mov",
 				"-c:v", "libvpx-vp9", "-crf", "28", "-b:v", "0", "-row-mt", "1", "-threads", threads,
 				"-vf", "scale=-2:'2*trunc(min(1080,ih)/2)'",
+				"-pix_fmt", "yuv420p",
 				"-c:a", "libopus", "-b:a", "96k",
 				"-progress", "pipe:1", "-loglevel", "error", "-y", "out_video.webm",
 			},
@@ -227,6 +231,7 @@ func TestFFmpegArgsGolden(t *testing.T) {
 				"-i", "input.mov",
 				"-c:v", "h264_videotoolbox", "-q:v", "65",
 				"-vf", "scale=-2:'2*trunc(min(1080,ih)/2)'",
+				"-pix_fmt", "yuv420p",
 				"-c:a", "aac", "-b:a", "96k",
 				"-movflags", "+faststart",
 				"-progress", "pipe:1", "-loglevel", "error", "-y", "out_video.mp4",
@@ -237,7 +242,7 @@ func TestFFmpegArgsGolden(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			vs := newVideoService(tt.config)
-			args := vs.ffmpegArgs("input.mov", tt.out, videoMetadata{codec: "h264", height: "1080"})
+			args := vs.ffmpegArgs("input.mov", tt.out, videoMetadata{codec: "h264", height: "1080"}, tt.config.maxConcurrent)
 			if diff := cmp.Diff(tt.want, args); diff != "" {
 				t.Errorf("ffmpegArgs mismatch (-want +got):\n%s", diff)
 			}
@@ -252,7 +257,7 @@ func TestFFmpegArgsGolden(t *testing.T) {
 func TestFFmpegArgsHeavySourceExact(t *testing.T) {
 	cfg := testConfig()
 	vs := newVideoService(cfg)
-	args := vs.ffmpegArgs("input.mkv", "out_video.mp4", videoMetadata{codec: "hevc", height: "2160"})
+	args := vs.ffmpegArgs("input.mkv", "out_video.mp4", videoMetadata{codec: "hevc", height: "2160"}, cfg.maxConcurrent)
 
 	threads := strconv.Itoa(autoThreadsPerJob(cfg.maxConcurrent))
 	decodePrefix := []string{"-hwaccel", "auto"}
@@ -264,6 +269,7 @@ func TestFFmpegArgsHeavySourceExact(t *testing.T) {
 		"-i", "input.mkv",
 		"-c:v", "libx264", "-preset", "medium", "-crf", "28", "-threads", threads,
 		"-vf", "scale=-2:'2*trunc(min(1080,ih)/2)'",
+		"-pix_fmt", "yuv420p",
 		"-c:a", "aac", "-b:a", "96k",
 		"-movflags", "+faststart",
 		"-progress", "pipe:1", "-loglevel", "error", "-y", "out_video.mp4",
@@ -283,13 +289,13 @@ func TestBuildFFmpegCommandString(t *testing.T) {
 	vs := newVideoService(cfg)
 	meta := videoMetadata{codec: "h264", height: "1080"}
 
-	cmd := vs.buildFFmpegCommand(context.Background(), "input.mov", "out_video.mp4", meta)
+	cmd := vs.buildFFmpegCommand(context.Background(), "input.mov", "out_video.mp4", meta, cfg.maxConcurrent)
 
 	if cmd.Args[0] != "ffmpeg" {
 		t.Errorf("argv[0] = %q, want \"ffmpeg\"", cmd.Args[0])
 	}
 
-	wantArgs := vs.ffmpegArgs("input.mov", "out_video.mp4", meta)
+	wantArgs := vs.ffmpegArgs("input.mov", "out_video.mp4", meta, cfg.maxConcurrent)
 	wantLine := "ffmpeg " + strings.Join(wantArgs, " ")
 	if got := strings.Join(cmd.Args, " "); got != wantLine {
 		t.Errorf("command line mismatch:\n got: %s\nwant: %s", got, wantLine)
@@ -299,7 +305,7 @@ func TestBuildFFmpegCommandString(t *testing.T) {
 func TestFFmpegArgsHardwareDecodePrecedesInput(t *testing.T) {
 	vs := newVideoService(testConfig())
 	// Heavy source (hevc) must trigger hwaccel decode flags, placed before -i.
-	args := vs.ffmpegArgs("input.mkv", "out.mp4", videoMetadata{codec: "hevc", height: "2160"})
+	args := vs.ffmpegArgs("input.mkv", "out.mp4", videoMetadata{codec: "hevc", height: "2160"}, 2)
 
 	hwIdx := indexOf(args, "-hwaccel")
 	iIdx := indexOf(args, "-i")

@@ -190,7 +190,7 @@ func TestCollectVideosFromArgGlobStillWorks(t *testing.T) {
 // source height can't reach libx264 and abort the encode.
 func TestEvenHeightScaleFilter(t *testing.T) {
 	vs := newVideoService(testConfig())
-	args := vs.ffmpegArgs("in.mov", "out.mp4", videoMetadata{codec: "h264", height: "405"})
+	args := vs.ffmpegArgs("in.mov", "out.mp4", videoMetadata{codec: "h264", height: "405"}, 2)
 	i := indexOf(args, "-vf")
 	if i < 0 || i+1 >= len(args) {
 		t.Fatalf("no -vf filter in %v", args)

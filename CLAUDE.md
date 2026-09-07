@@ -30,6 +30,9 @@ Fideogo is a terminal user interface (TUI) application for compressing video fil
 - Gradient color progress indicator (cyan → green → orange → yellow)
 - Video metadata display (resolution, codec, bitrate)
 - Cancel rendering mid-process (press 'c' or ctrl+c)
+- Scrolling viewport for long directories (PgUp/PgDn, Home/End, also while a
+  batch runs): rows are clipped to the terminal height with "N more" markers,
+  and names/detail lines are truncated to its width, so the frame never overflows
 - Auto-compression with optimized ffmpeg settings
 - Batch compression of multiple files with bounded concurrency
 - Output format conversion (mp4/mov/mkv/webm) and size presets (`--size`)
@@ -37,6 +40,8 @@ Fideogo is a terminal user interface (TUI) application for compressing video fil
 - In-place replacement (`--overwrite`): replace each source with its compressed
   result instead of writing an `out_`-prefixed copy
 - Overwrite prompt (overwrite / skip / cancel) with collision-safe output naming
+- Unknown `-`/`--` options are rejected with a hint; `--` ends option parsing so
+  files whose names start with a dash can be named
 
 ## IMPORTANT: Build & Deploy Instructions for AI Agents
 
@@ -90,7 +95,7 @@ fideogo/
 │       ├── discover.go  # videoFile + fileStatus enum, findVideos, collectVideosFromPattern
 │       ├── probe.go     # videoMetadata + ffprobe (single-call) + formatVideoInfo
 │       ├── encode.go    # videoService, buildFFmpegCommand, processFile worker, streamProgress/drainStderr
-│       ├── encode_test.go # ffmpegArgs unit + golden tests (go-cmp)
+│       ├── *_test.go    # unit tests beside the code (see Testing)
 │       ├── model.go     # Bubble Tea model, msg types, Init, Update dispatch
 │       ├── handlers.go  # handleX methods, fillSlots state machine, batchSettled predicate
 │       ├── view.go      # View() + renderX helpers, lipgloss styles, gradient + precomputed percent tables
@@ -120,6 +125,11 @@ Tests live beside the code in `internal/fideogo` (white-box, `package fideogo`).
   When adding OS- or filesystem-dependent behavior, thread the dependency in the
   same way instead of calling `runtime.GOOS` / `os` directly — keep it
   unit-testable on one machine.
+
+  Likewise `streamProgress` takes its `send` func as a parameter, `parseProbeOutput`
+  is split from the ffprobe exec, and `parseArgs` returns errors instead of
+  exiting — so progress coalescing, probe parsing, and CLI parsing are all tested
+  without a running program or a real ffmpeg.
 
 - **Integration tests** — `go test -tags=integration ./...`. Behind the
   `integration` build tag: they generate a tiny clip, run a real ffmpeg encode end
@@ -152,9 +162,16 @@ encode.go (`ffmpegArgs` / `profileFor`).
   `2*trunc(.../2)` wrapper rounds the height — so an odd-height 4:2:0 source (where
   no downscale happens, ih ≤ target) can't reach libx264/yuv420p and abort with
   "height not divisible by 2".
+- Pixel format: forced to `yuv420p` (8-bit 4:2:0) for every container, so 10-bit
+  HDR phone clips, 4:2:2 ProRes, and 4:4:4 screen recordings don't yield High 10 /
+  High 4:2:2 profiles that many players and hardware decoders refuse. No
+  tone-mapping is done, so HDR sources come out SDR-flat.
 - Audio: AAC at 96k (Opus at 96k for webm)
 - Concurrency: software encodes are thread-capped per job so parallel jobs don't
-  thrash; hardware runs cap at 2 concurrent jobs
+  thrash. The budget is `NumCPU / jobs`, where `jobs` is what will actually run
+  side by side — in-flight plus still-queued files, capped at `maxConcurrent`
+  (`batchJobs` in handlers.go) — so a single file gets every core. Hardware runs
+  cap at 2 concurrent jobs
 - Output: written next to the source with an `out_` prefix, with collision-safe
   naming within a batch. With `--overwrite`, the source file is replaced in place
   instead: ffmpeg encodes to a hidden `.…fideogo-tmp` scratch file next to the
@@ -183,6 +200,11 @@ follow from that and are easy to regress:
   most one `progressMsg` per whole percent. ffmpeg prints progress blocks many
   times a second, and every forwarded message rebuilds the entire View across all
   concurrent files — so gate on the displayed granularity, not raw ffmpeg output.
+- **Keep `rowLines` in step with `renderFileRow`.** The viewport (view.go) decides
+  which rows fit the terminal from `rowLines`, without rendering them, and relies
+  on every name/detail line being truncated (`fit`) rather than wrapped. A detail
+  line added to one and not the other, or an untruncated line, clips the frame.
+  `TestRowLinesMatchesRender` pins this.
 
 Per-file lifecycle state is the typed `fileStatus` enum (`statusPending` /
 `statusProcessing` / `statusDone` / `statusError`), not strings; `statusPending`

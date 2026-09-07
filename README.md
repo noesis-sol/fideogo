@@ -159,7 +159,7 @@ The width is automatically calculated to preserve the original aspect ratio.
 
 ### Output Format
 
-By default, output files keep the same format as the input. Use `--format` to convert to a different container:
+By default, output is MP4 (H.264 video, AAC audio) whatever the source container, so a WebM or MKV input isn't locked into its original, slower codecs. Use `--format` to pick another container (the one exception is a bare `--overwrite`, which keeps each file's own container unless `--format` is also given):
 
 | Format | Description |
 |--------|-------------|
@@ -179,6 +179,7 @@ The flag works in any position and can be combined with directories, file paths,
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` or `k` / `j` | Navigate through video list |
+| `PgUp` / `PgDn`, `Home` / `End` (`g` / `G`) | Jump through long lists (works while a batch is running) |
 | `Space` | Toggle selection of current video |
 | `a` | Select all videos and start processing |
 | `Enter` | Start processing selected videos |

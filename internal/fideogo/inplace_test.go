@@ -104,12 +104,15 @@ func TestParseArgsOverwrite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, paths, _, overwrite := parseArgs(tt.args)
-			if overwrite != tt.overwrite {
-				t.Errorf("overwrite = %v, want %v", overwrite, tt.overwrite)
+			o, err := parseArgs(tt.args)
+			if err != nil {
+				t.Fatalf("parseArgs(%v) errored: %v", tt.args, err)
 			}
-			if len(paths) != len(tt.paths) || (len(paths) > 0 && paths[0] != tt.paths[0]) {
-				t.Errorf("paths = %v, want %v", paths, tt.paths)
+			if o.overwrite != tt.overwrite {
+				t.Errorf("overwrite = %v, want %v", o.overwrite, tt.overwrite)
+			}
+			if len(o.paths) != len(tt.paths) || (len(o.paths) > 0 && o.paths[0] != tt.paths[0]) {
+				t.Errorf("paths = %v, want %v", o.paths, tt.paths)
 			}
 		})
 	}

@@ -26,25 +26,6 @@ func checkDependencies() error {
 	return nil
 }
 
-// parseFlagValue extracts the value from --flag=value or --flag value syntax.
-// Returns the value and how many args were consumed (0 for =value, 1 for space-separated).
-func parseFlagValue(args []string, i int, name, hint string) (string, int) {
-	arg := args[i]
-	if eqIdx := strings.Index(arg, "="); eqIdx != -1 {
-		val := arg[eqIdx+1:]
-		if val == "" {
-			fmt.Fprintf(os.Stderr, "Error: %s requires a value\n%s\n", name, hint)
-			os.Exit(1)
-		}
-		return val, 0
-	}
-	if i+1 >= len(args) {
-		fmt.Fprintf(os.Stderr, "Error: %s requires a value\n%s\n", name, hint)
-		os.Exit(1)
-	}
-	return args[i+1], 1
-}
-
 const usageText = `Usage: fideogo [options] [path|pattern ...]
 
 Options:
@@ -52,6 +33,7 @@ Options:
   --size <size>    Target size: sm/small (540p), md/medium (1080p), lg/large (2160p)
   --hw             Use hardware encoder (VideoToolbox/NVENC/QSV/AMF) — much faster
   --overwrite      Replace each source file with its compressed result (no out_ prefix)
+  --               Treat every following argument as a path (for names starting with -)
   --help, -h       Show this help message
 
 Examples:
@@ -65,36 +47,84 @@ Examples:
   fideogo --size sm video.mp4   Compress to 540p
   fideogo --hw video.mov        Use hardware encoder
   fideogo --overwrite video.mp4 Replace the original with the compressed file
+  fideogo -- -clip.mp4          Compress a file whose name starts with a dash
 `
 
-// parseArgs extracts --format, --size, --hw, --overwrite flags and positional
-// paths from args in any order. Multiple positional paths are accepted so
-// shell-expanded wildcards (e.g. */videos/*.mp4) just work without quoting.
-func parseArgs(args []string) (format, size string, paths []string, hw, overwrite bool) {
+// cliOptions is the parsed command line.
+type cliOptions struct {
+	format    string
+	size      string
+	paths     []string
+	hw        bool
+	overwrite bool
+	help      bool
+}
+
+// parseArgs extracts the --format, --size, --hw, --overwrite and --help flags
+// and the positional paths from args, in any order, so shell-expanded wildcards
+// (e.g. */videos/*.mp4) just work without quoting. Anything else that starts
+// with "-" is an unknown option and is rejected — silently trying it as a file
+// name used to surface as a baffling "stat --verbose: no such file". A "--"
+// ends option parsing so a file whose name begins with "-" can still be named.
+// Errors are returned rather than exiting so the parser is unit-testable; Run
+// owns the exit codes.
+func parseArgs(args []string) (cliOptions, error) {
+	var o cliOptions
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		flagName := strings.SplitN(arg, "=", 2)[0]
-
-		if flagName == "--format" || flagName == "-format" {
-			val, skip := parseFlagValue(args, i, "--format", "Supported formats: mp4, mov, mkv, webm")
-			format = val
-			i += skip
-		} else if flagName == "--size" || flagName == "-size" {
-			val, skip := parseFlagValue(args, i, "--size", "Supported sizes: sm, small, md, medium, lg, large")
-			size = val
-			i += skip
-		} else if arg == "--hw" || arg == "-hw" {
-			hw = true
-		} else if arg == "--overwrite" || arg == "-overwrite" {
-			overwrite = true
-		} else if arg == "--help" || arg == "-h" {
-			fmt.Print(usageText)
-			os.Exit(0)
-		} else {
-			paths = append(paths, arg)
+		if arg == "--" {
+			o.paths = append(o.paths, args[i+1:]...)
+			break
+		}
+		name, inline, hasInline := strings.Cut(arg, "=")
+		switch name {
+		case "--format", "-format":
+			val, skip, err := flagValue(args, i, "--format", inline, hasInline, "Supported formats: mp4, mov, mkv, webm")
+			if err != nil {
+				return o, err
+			}
+			o.format, i = val, i+skip
+		case "--size", "-size":
+			val, skip, err := flagValue(args, i, "--size", inline, hasInline, "Supported sizes: sm, small, md, medium, lg, large")
+			if err != nil {
+				return o, err
+			}
+			o.size, i = val, i+skip
+		case "--hw", "-hw", "--overwrite", "-overwrite", "--help", "-h":
+			if hasInline {
+				return o, fmt.Errorf("option %s takes no value", name)
+			}
+			switch name {
+			case "--hw", "-hw":
+				o.hw = true
+			case "--overwrite", "-overwrite":
+				o.overwrite = true
+			default:
+				o.help = true
+			}
+		default:
+			if len(arg) > 1 && strings.HasPrefix(arg, "-") {
+				return o, fmt.Errorf("unknown option %q (put -- before file names that start with a dash)", arg)
+			}
+			o.paths = append(o.paths, arg)
 		}
 	}
-	return
+	return o, nil
+}
+
+// flagValue returns the value of a --flag=value or --flag value option and how
+// many extra args it consumed (0 for the inline form, 1 for the separate one).
+func flagValue(args []string, i int, name, inline string, hasInline bool, hint string) (string, int, error) {
+	if hasInline {
+		if inline == "" {
+			return "", 0, fmt.Errorf("%s requires a value\n%s", name, hint)
+		}
+		return inline, 0, nil
+	}
+	if i+1 >= len(args) {
+		return "", 0, fmt.Errorf("%s requires a value\n%s", name, hint)
+	}
+	return args[i+1], 1, nil
 }
 
 // collectVideosFromArg resolves a single CLI argument — a glob pattern, a
@@ -171,20 +201,33 @@ func createModelFromPaths(paths []string) (model, error) {
 	return newModel(allFiles), nil
 }
 
-// Run is the application entry point: it checks dependencies, parses CLI flags
-// and positional paths, builds the initial model, and starts the Bubble Tea
-// program. It owns process exit codes (via os.Exit) so cmd/fideogo stays a thin
-// shell around this package.
+// Run is the application entry point: it parses CLI flags and positional
+// paths, checks dependencies, builds the initial model, and starts the Bubble
+// Tea program. It owns process exit codes (via os.Exit) so cmd/fideogo stays a
+// thin shell around this package.
 func Run() {
+	opts, err := parseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\nRun 'fideogo --help' for usage.\n", err)
+		os.Exit(1)
+	}
+	if opts.help {
+		fmt.Print(usageText)
+		os.Exit(0)
+	}
+
+	// Dependencies are checked only once the command line is valid, so --help
+	// and usage errors work on a machine that has no ffmpeg yet.
 	if err := checkDependencies(); err != nil {
 		displayInstallationHelp()
 		os.Exit(1)
 	}
 
-	format, size, paths, hw, overwrite := parseArgs(os.Args[1:])
-
+	// Container names are case-insensitive on the command line (--format MP4),
+	// like the --size presets.
+	format := strings.ToLower(opts.format)
 	if format != "" && !validFormats[format] {
-		fmt.Fprintf(os.Stderr, "Error: unsupported format %q\nSupported formats: mp4, mov, mkv, webm\n", format)
+		fmt.Fprintf(os.Stderr, "Error: unsupported format %q\nSupported formats: mp4, mov, mkv, webm\n", opts.format)
 		os.Exit(1)
 	}
 
@@ -193,11 +236,11 @@ func Run() {
 	// mode an unspecified --format instead means "keep each file's own container",
 	// so a plain --overwrite recompresses in place without converting the file (and
 	// deleting the original under a new extension).
-	if format == "" && !overwrite {
+	if format == "" && !opts.overwrite {
 		format = defaultOutputFormat
 	}
 
-	if hw && !profileFor(format).allowsHW {
+	if opts.hw && !profileFor(format).allowsHW {
 		// h264_videotoolbox emits H.264, which a WebM container can't hold;
 		// WebM always goes through the software VP9 encoder instead.
 		fmt.Fprintf(os.Stderr, "Error: --hw is not compatible with --format %s (it requires a software codec)\n", format)
@@ -205,20 +248,18 @@ func Run() {
 	}
 
 	var resolution string
-	if size != "" {
-		res, ok := validSizes[strings.ToLower(size)]
+	if opts.size != "" {
+		res, ok := validSizes[strings.ToLower(opts.size)]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "Error: unsupported size %q\nSupported sizes: sm, small, md, medium, lg, large\n", size)
+			fmt.Fprintf(os.Stderr, "Error: unsupported size %q\nSupported sizes: sm, small, md, medium, lg, large\n", opts.size)
 			os.Exit(1)
 		}
 		resolution = res
 	}
 
 	var m model
-	var err error
-
-	if len(paths) > 0 {
-		m, err = createModelFromPaths(paths)
+	if len(opts.paths) > 0 {
+		m, err = createModelFromPaths(opts.paths)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -231,9 +272,9 @@ func Run() {
 		m.config.resolution = resolution
 	}
 	m.config.outputFormat = format
-	m.config.hwAccel = hw
-	m.config.inPlace = overwrite
-	if hw {
+	m.config.hwAccel = opts.hw
+	m.config.inPlace = opts.overwrite
+	if opts.hw {
 		encoder, err := resolveHWEncoder()
 		if err != nil {
 			// No usable hardware encoder — fall back to software instead of
@@ -278,12 +319,12 @@ func Run() {
 	program = tea.NewProgram(m, tea.WithoutSignalHandler())
 
 	// Bubble Tea consumes Ctrl+C as a key while the terminal is in raw mode, but an
-	// external SIGINT/SIGTERM (kill, closed terminal) would otherwise terminate the
-	// process abruptly — skipping the terminal restore and leaving in-flight ffmpeg
-	// children running. Translate those signals into a graceful Quit so Run()
-	// returns and the cleanup below executes.
+	// external SIGINT/SIGTERM/SIGHUP (kill, closed terminal) would otherwise
+	// terminate the process abruptly — skipping the terminal restore and leaving
+	// in-flight ffmpeg children running. Translate those signals into a graceful
+	// Quit so Run() returns and the cleanup below executes.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigCh)
 	go func() {
 		<-sigCh
@@ -292,12 +333,16 @@ func Run() {
 
 	finalModel, runErr := program.Run()
 	// However the program ended (normal quit, signal, or error), cancel every
-	// still-registered encode so no ffmpeg child is orphaned past our exit.
+	// still-registered encode so no ffmpeg child is orphaned past our exit…
 	if fm, ok := finalModel.(model); ok {
 		for _, cancel := range fm.cancels {
 			cancel()
 		}
 	}
+	// …then let the workers finish their cleanup: each removes its partial output
+	// only after ffmpeg has died, and exiting first would leave a truncated out_
+	// file or scratch temp behind. Bounded, so a wedged worker can't hold the quit.
+	m.videoService.waitWorkers(workerDrainTimeout)
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", runErr)
 		os.Exit(1)

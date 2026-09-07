@@ -2,6 +2,7 @@ package fideogo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -40,11 +41,38 @@ func (vs *videoService) probeMetadata(ctx context.Context, path string) (videoMe
 	// ffprobe immediately instead of leaving it running on a slow/large input.
 	out, err := exec.CommandContext(ctx, "ffprobe", args...).Output()
 	if err != nil {
-		return videoMetadata{}, fmt.Errorf("ffprobe failed: %w", err)
+		return videoMetadata{}, fmt.Errorf("ffprobe failed: %w", withStderr(err))
 	}
+	return parseProbeOutput(out)
+}
 
+// withStderr folds the captured stderr of a failed command into its error, so
+// a probe failure reports ffprobe's own diagnosis ("Invalid data found when
+// processing input") instead of a bare "exit status 1". Only the last line is
+// kept: it is the decisive one, and the UI renders an error on a single row.
+func withStderr(err error) error {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || len(ee.Stderr) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, lastLine(string(ee.Stderr)))
+}
+
+// lastLine returns the final non-blank line of s, trimmed ("" if none).
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
+// parseProbeOutput turns ffprobe's key=value listing into videoMetadata. A
+// source with no video stream — an audio-only .m4v/.mp4, say — yields no
+// stream fields at all; that is reported as an error here so the file is
+// refused with a clear reason rather than handed to ffmpeg, which would fail
+// on the scale filter with a cryptic message.
+func parseProbeOutput(out []byte) (videoMetadata, error) {
 	var meta videoMetadata
 	for _, line := range strings.Split(string(out), "\n") {
+
 		key, val, ok := strings.Cut(line, "=")
 		if !ok {
 			continue
@@ -70,6 +98,9 @@ func (vs *videoService) probeMetadata(ctx context.Context, path string) (videoMe
 			}
 		}
 	}
+	if meta.width == "" || meta.height == "" {
+		return meta, errors.New("no video stream found (audio-only or unreadable file)")
+	}
 	return meta, nil
 }
 
@@ -89,9 +120,10 @@ func (vs *videoService) formatVideoInfo(path string, meta videoMetadata) string 
 
 func (vs *videoService) getVideoInfo(ctx context.Context, path string) string {
 	meta, err := vs.probeMetadata(ctx, path)
-	if err != nil || meta.width == "" || meta.height == "" {
+	if err != nil {
 		return "unable to read video info"
 	}
+
 	return vs.formatVideoInfo(path, meta)
 }
 

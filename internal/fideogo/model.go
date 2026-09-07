@@ -10,9 +10,16 @@ import (
 )
 
 type model struct {
-	// File list and cursor selection.
+	// File list, cursor selection, and scroll position (offset is the first
+	// visible row; Update keeps it tracking the cursor).
 	files  []videoFile
 	cursor int
+	offset int
+
+	// Terminal size from the last tea.WindowSizeMsg; zero until known, in which
+	// case nothing is clipped or truncated.
+	width  int
+	height int
 
 	// Batch progress.
 	processing      bool
@@ -104,9 +111,27 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.dispatch(msg)
+	// Keep the scroll position tracking the cursor after every message — not
+	// only cursor moves: a row grows when its file finishes (In:/Out: lines) or
+	// fails, and the terminal can shrink, either of which can push the cursor
+	// out of the visible window.
+	next.offset = next.scrollOffset()
+	return next, cmd
+}
+
+// dispatch routes a message to its handler.
+func (m model) dispatch(msg tea.Msg) (model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		// Shrink the bar on narrow terminals so a progress line never wraps.
+		m.progressBar.Width = max(10, min(40, msg.Width-10))
+		return m, nil
+
 	case autoStartMsg:
-		return m, m.startProcessing()
+		cmd := m.startProcessing()
+		return m, cmd
 
 	case overwriteConfirmMsg:
 		return m.handleOverwriteConfirm()

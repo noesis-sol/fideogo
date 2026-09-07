@@ -39,6 +39,14 @@ func autoMaxConcurrent() int {
 	return n
 }
 
+// concurrentJobs is how many encodes will actually run side by side: the
+// configured ceiling, or fewer when the batch is smaller than it (never below
+// one). It is the divisor for the per-job thread budget, so a one-file batch
+// gets every core instead of NumCPU/maxConcurrent.
+func concurrentJobs(maxConcurrent, queued int) int {
+	return max(1, min(maxConcurrent, queued))
+}
+
 // autoThreadsPerJob divides available cores across concurrent ffmpeg jobs.
 func autoThreadsPerJob(maxConcurrent int) int {
 	if maxConcurrent < 1 {
