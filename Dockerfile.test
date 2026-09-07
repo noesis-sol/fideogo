@@ -2,8 +2,8 @@
 # the integration tests that shell out to a real ffmpeg. This is a test harness,
 # not a production/runtime image for the app.
 #
-#   docker build -f Dockerfile.test -t fideogo-test .
-#   docker run --rm fideogo-test
+#   docker build -f Dockerfile.test -t fideo-test .
+#   docker run --rm fideo-test
 #
 FROM golang:1.27-bookworm
 

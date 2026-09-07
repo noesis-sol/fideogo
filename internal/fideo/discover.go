@@ -1,4 +1,4 @@
-package fideogo
+package fideo
 
 import (
 	"fmt"

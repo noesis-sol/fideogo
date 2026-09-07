@@ -1,6 +1,6 @@
 //go:build integration
 
-package fideogo
+package fideo
 
 import (
 	"context"

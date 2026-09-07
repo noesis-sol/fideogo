@@ -1,4 +1,4 @@
-package fideogo
+package fideo
 
 import (
 	"fmt"
@@ -108,7 +108,7 @@ func buildPercentTables() ([101]lipgloss.Style, [101]string) {
 func (m model) View() string {
 	var s strings.Builder
 
-	s.WriteString(titleStyle.Render("🎬 FideoGo Video Compressor"))
+	s.WriteString(titleStyle.Render("🎬 Fideo Video Compressor"))
 	s.WriteString("\n")
 
 	m.renderStatusHeader(&s)

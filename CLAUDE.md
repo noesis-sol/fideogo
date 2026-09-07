@@ -1,8 +1,8 @@
-# Fideogo - Video Compressor TUI
+# Fideo - Video Compressor TUI
 
 ## Project Description
 
-Fideogo is a terminal user interface (TUI) application for compressing video files using ffmpeg. It provides an interactive interface for selecting videos — from the current directory, explicit paths, or shell globs — and compressing them with sensible defaults (H.264, 1080p, CRF 28), plus optional format, size, and hardware-encoder overrides.
+Fideo is a terminal user interface (TUI) application for compressing video files using ffmpeg. It provides an interactive interface for selecting videos — from the current directory, explicit paths, or shell globs — and compressing them with sensible defaults (H.264, 1080p, CRF 28), plus optional format, size, and hardware-encoder overrides.
 
 ## Language
 
@@ -52,23 +52,23 @@ When making changes to this project, follow these steps:
 **ALWAYS** run this command first to find where the binary is installed:
 
 ```bash
-which fideogo
+which fideo
 ```
 
-This will return the full path (e.g., `/Users/<username>/.local/bin/fideogo`)
+This will return the full path (e.g., `/Users/<username>/.local/bin/fideo`)
 
 ### 2. After Completing Any Task
 
 **ALWAYS** compile and replace the binary at the location found in step 1. The
-entry point lives under `./cmd/fideogo`, so build that package (not `.`):
+entry point lives under `./cmd/fideo`, so build that package (not `.`):
 
 ```bash
-go build -o fideogo ./cmd/fideogo && mv fideogo <FULL_PATH_FROM_WHICH_COMMAND>
+go build -o fideo ./cmd/fideo && mv fideo <FULL_PATH_FROM_WHICH_COMMAND>
 ```
 
 For example:
 ```bash
-go build -o fideogo ./cmd/fideogo && mv fideogo /Users/michailmichailidis/.local/bin/fideogo
+go build -o fideo ./cmd/fideo && mv fideo /Users/michailmichailidis/.local/bin/fideo
 ```
 
 ### 3. Never Skip This Step
@@ -84,12 +84,12 @@ under `internal/` (so it can't be imported by other modules and tests keep
 white-box access to unexported helpers).
 
 ```
-fideogo/
+fideo/
 ├── cmd/
-│   └── fideogo/
-│       └── main.go      # Thin entry point: calls fideogo.Run()
+│   └── fideo/
+│       └── main.go      # Thin entry point: calls fideo.Run()
 ├── internal/
-│   └── fideogo/         # package fideogo — all application code
+│   └── fideo/           # package fideo — all application code
 │       ├── app.go       # Run() entry: CLI parsing, dep check, program bootstrap
 │       ├── config.go    # compressionConfig, defaults, autoMaxConcurrent, validators
 │       ├── discover.go  # videoFile + fileStatus enum, findVideos, collectVideosFromPattern
@@ -106,11 +106,11 @@ fideogo/
 ```
 
 Note: file references elsewhere in this doc (e.g. "encode.go", "config.go") now
-live under `internal/fideogo/`.
+live under `internal/fideo/`.
 
 ## Testing
 
-Tests live beside the code in `internal/fideogo` (white-box, `package fideogo`).
+Tests live beside the code in `internal/fideo` (white-box, `package fideo`).
 
 - **Unit tests** — `go test ./...`. Pure and hermetic: they never exec ffmpeg.
   OS-specific logic is *injectable* rather than reading `runtime.GOOS` / the real
@@ -136,8 +136,8 @@ Tests live beside the code in `internal/fideogo` (white-box, `package fideogo`).
   to end, then ffprobe the result. Skipped automatically when ffmpeg/ffprobe are
   not on PATH, so the default `go test` stays hermetic.
 
-- **Local Linux reproduction** — `docker build -f Dockerfile.test -t fideogo-test .`
-  then `docker run --rm fideogo-test`. Runs vet + unit + integration on Linux with
+- **Local Linux reproduction** — `docker build -f Dockerfile.test -t fideo-test .`
+  then `docker run --rm fideo-test`. Runs vet + unit + integration on Linux with
   a real ffmpeg, exercising the `GOOS=linux` paths. (Hardware encoders still need a
   real GPU; macOS/VideoToolbox can't run in a Linux container.)
 
@@ -174,7 +174,7 @@ encode.go (`ffmpegArgs` / `profileFor`).
   cap at 2 concurrent jobs
 - Output: written next to the source with an `out_` prefix, with collision-safe
   naming within a batch. With `--overwrite`, the source file is replaced in place
-  instead: ffmpeg encodes to a hidden `.…fideogo-tmp` scratch file next to the
+  instead: ffmpeg encodes to a hidden `.…fideo-tmp` scratch file next to the
   destination, which is atomically renamed over the original on success (and the
   original removed if `--format` changed its extension). A bare `--overwrite` keeps
   each file's own container; pair it with `--format` to also convert. The collision

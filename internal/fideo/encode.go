@@ -1,4 +1,4 @@
-package fideogo
+package fideo
 
 import (
 	"bufio"
@@ -76,7 +76,7 @@ func getOutputPath(inputPath, outputFormat string) string {
 
 // tempOutputMarker tags the scratch files written during an in-place encode, so
 // findVideos can ignore any that a crash leaves behind.
-const tempOutputMarker = ".fideogo-tmp"
+const tempOutputMarker = ".fideo-tmp"
 
 // inPlaceDest returns the final destination for an in-place (--overwrite) encode:
 // the source file itself, with its extension swapped to outputFormat only when an

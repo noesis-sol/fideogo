@@ -2,10 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(go build:*)",
-      "Bash(timeout 2 ./fideogo:*)",
-      "Bash(fideogo --format webm)",
+      "Bash(timeout 2 ./fideo:*)",
+      "Bash(fideo --format webm)",
       "Bash(echo \"exit: $?\")",
-      "Bash(fideogo:*)",
+      "Bash(fideo:*)",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
       "Bash(ffmpeg -hide_banner -f lavfi -i \"testsrc=duration=1:size=640x360\" -vf \"scale=-2:'min\\(1080,ih\\)'\" -frames:v 1 -f null -)",

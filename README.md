@@ -1,4 +1,4 @@
-# 🎬 FideoGo - Video Compressor with Charm TUI
+# 🎬 Fideo - Video Compressor with Charm TUI
 
 <div align="center">
 
@@ -48,41 +48,41 @@ git clone <your-repo-url>
 cd compress-tui
 
 # Build the binary (dependencies download automatically)
-go build -o fideogo main.go
+go build -o fideo main.go
 
 # Move to your PATH (optional)
-mv fideogo ~/.local/bin/fideogo
+mv fideo ~/.local/bin/fideo
 # or
-sudo mv fideogo /usr/local/bin/fideogo
+sudo mv fideo /usr/local/bin/fideo
 ```
 
 ### Usage
 
 ```bash
 # Compress videos in current directory
-fideogo
+fideo
 
 # Compress videos in a specific directory
-fideogo /path/to/videos
+fideo /path/to/videos
 
 # Compress a specific video file
-fideogo video.mp4
+fideo video.mp4
 
 # Use wildcards to select multiple files (always quote the pattern)
-fideogo '*.mp4'
-fideogo '/path/to/videos/*.mov'
+fideo '*.mp4'
+fideo '/path/to/videos/*.mov'
 
 # Convert to a specific format
-fideogo --format mkv video.mp4
-fideogo /path/to/videos --format mov
+fideo --format mkv video.mp4
+fideo /path/to/videos --format mov
 
 # Compress to a specific size
-fideogo --size sm video.mp4
-fideogo --size large /path/to/videos
+fideo --size sm video.mp4
+fideo --size large /path/to/videos
 
 # Let the GPU do the heavy lifting (auto-detects the right encoder)
-fideogo --hw video.mov
-fideogo --hw --size lg /path/to/videos
+fideo --hw video.mov
+fideo --hw --size lg /path/to/videos
 ```
 
 ### Wildcard Patterns
@@ -96,20 +96,20 @@ folders. The following metacharacters are supported:
 | `?` | Any single character |
 | `[abc]` / `[a-z]` | One character from the set or range |
 
-> **Always quote your pattern** (`'...'`) so your shell passes it to fideogo
-> literally instead of expanding it first. fideogo accepts a single path/pattern
+> **Always quote your pattern** (`'...'`) so your shell passes it to fideo
+> literally instead of expanding it first. fideo accepts a single path/pattern
 > argument — an unquoted glob that your shell expands into several filenames will
 > be rejected with `only one path allowed`.
 
 ```bash
 # Every .mov in the current directory
-fideogo '*.mov'
+fideo '*.mov'
 
 # Files like clip1.mp4, clip2.mp4, clipX.mp4 (single-character wildcard)
-fideogo 'clip?.mp4'
+fideo 'clip?.mp4'
 
 # Files starting with a, b, or c
-fideogo '[abc]*.mp4'
+fideo '[abc]*.mp4'
 ```
 
 #### Finding the same file across subfolders
@@ -123,10 +123,10 @@ of a parent directory, put a `*` where the subfolder name goes:
 #   courses/python/intro.mp4
 #   courses/golang/intro.mp4
 #   courses/rust/intro.mp4
-fideogo 'courses/*/intro.mp4'
+fideo 'courses/*/intro.mp4'
 
 # One level deeper (e.g. courses/python/week1/intro.mp4)
-fideogo 'courses/*/*/intro.mp4'
+fideo 'courses/*/*/intro.mp4'
 ```
 
 You can also point a wildcard at the subfolders themselves — each matched
@@ -134,7 +134,7 @@ directory is scanned (non-recursively) for supported videos:
 
 ```bash
 # Compress every video sitting directly inside each subfolder of ./courses
-fideogo 'courses/*'
+fideo 'courses/*'
 ```
 
 ### Output Size
@@ -148,10 +148,10 @@ Control the output resolution height with `--size`:
 | Large | `lg`, `large` | 2160p |
 
 ```bash
-fideogo --size sm video.mp4
+fideo --size sm video.mp4
 # Compresses to 540p height
 
-fideogo --size large --format mkv video.mp4
+fideo --size large --format mkv video.mp4
 # Compresses to 2160p height as MKV
 ```
 
@@ -168,7 +168,7 @@ By default, output is MP4 (H.264 video, AAC audio) whatever the source container
 | `mkv`  | Matroska — flexible container, supports virtually any codec |
 
 ```bash
-fideogo --format mp4 video.mov
+fideo --format mp4 video.mov
 # Produces: out_video.mp4
 ```
 
@@ -188,7 +188,7 @@ The flag works in any position and can be combined with directories, file paths,
 
 ## 🎛️ Compression Settings
 
-Fideogo uses optimized ffmpeg settings for the best balance between quality and file size:
+Fideo uses optimized ffmpeg settings for the best balance between quality and file size:
 
 | Setting | Value | Description |
 |---------|-------|-------------|
@@ -202,17 +202,17 @@ Fideogo uses optimized ffmpeg settings for the best balance between quality and 
 
 ## ⚡ Hardware Acceleration & Cross-Platform Performance
 
-Fideogo runs the same everywhere — and gets faster the better your hardware is.
+Fideo runs the same everywhere — and gets faster the better your hardware is.
 Add `--hw` and let your GPU's dedicated media engine carry the encode, typically
 several times quicker than software x264:
 
 ```bash
-fideogo --hw video.mov
+fideo --hw video.mov
 ```
 
 ### 🎯 The right encoder, picked for you
 
-No flags to memorize, no per-GPU setup. Fideogo detects the best available
+No flags to memorize, no per-GPU setup. Fideo detects the best available
 encoder for your platform and hardware:
 
 | Platform | Encoders tried (in order) | Backend |
@@ -220,7 +220,7 @@ encoder for your platform and hardware:
 | 🍎 macOS (Intel & Apple Silicon) | `h264_videotoolbox` | Apple VideoToolbox |
 | 🐧 Linux / 🪟 Windows | `h264_nvenc` → `h264_qsv` → `h264_amf` | NVIDIA NVENC · Intel QuickSync · AMD AMF |
 
-And it's careful about it. Fideogo only offers an encoder that your `ffmpeg`
+And it's careful about it. Fideo only offers an encoder that your `ffmpeg`
 build actually ships, prefers the one whose GPU is physically present (on Linux
 it even inspects `/dev/nvidia*` and DRM render nodes by vendor), and runs a quick
 probe-encode to confirm it really initializes. If nothing pans out, it **falls
@@ -287,17 +287,17 @@ compress-tui/
 
 ```bash
 # Build the binary (dependencies are automatically downloaded)
-go build -o fideogo main.go
+go build -o fideo main.go
 
 # Or manually download dependencies first (optional)
 go mod download
-go build -o fideogo main.go
+go build -o fideo main.go
 
 # Run directly without installing
 go run main.go
 
 # Build and install in one command
-go build -o fideogo main.go && mv fideogo ~/.local/bin/fideogo
+go build -o fideo main.go && mv fideo ~/.local/bin/fideo
 ```
 
 > **Note:** Go automatically downloads and caches dependencies during the build process. You don't need to run `go mod download` explicitly unless you want to pre-fetch dependencies.

@@ -1,4 +1,4 @@
-package fideogo
+package fideo
 
 import (
 	"fmt"
@@ -26,7 +26,7 @@ func checkDependencies() error {
 	return nil
 }
 
-const usageText = `Usage: fideogo [options] [path|pattern ...]
+const usageText = `Usage: fideo [options] [path|pattern ...]
 
 Options:
   --format <fmt>   Output format: mp4, mov, mkv, webm (default: mp4)
@@ -37,17 +37,17 @@ Options:
   --help, -h       Show this help message
 
 Examples:
-  fideogo                       Compress videos in current directory
-  fideogo video.mp4             Compress a single file
-  fideogo a.mp4 b.mov clip.mkv  Compress several files
-  fideogo */videos/*.mp4        Compress shell-expanded matches
-  fideogo /path/to/dir          Compress videos in a directory
-  fideogo '*.mov'               Compress matching files
-  fideogo --format mkv .        Convert to MKV format
-  fideogo --size sm video.mp4   Compress to 540p
-  fideogo --hw video.mov        Use hardware encoder
-  fideogo --overwrite video.mp4 Replace the original with the compressed file
-  fideogo -- -clip.mp4          Compress a file whose name starts with a dash
+  fideo                       Compress videos in current directory
+  fideo video.mp4             Compress a single file
+  fideo a.mp4 b.mov clip.mkv  Compress several files
+  fideo */videos/*.mp4        Compress shell-expanded matches
+  fideo /path/to/dir          Compress videos in a directory
+  fideo '*.mov'               Compress matching files
+  fideo --format mkv .        Convert to MKV format
+  fideo --size sm video.mp4   Compress to 540p
+  fideo --hw video.mov        Use hardware encoder
+  fideo --overwrite video.mp4 Replace the original with the compressed file
+  fideo -- -clip.mp4          Compress a file whose name starts with a dash
 `
 
 // cliOptions is the parsed command line.
@@ -203,12 +203,12 @@ func createModelFromPaths(paths []string) (model, error) {
 
 // Run is the application entry point: it parses CLI flags and positional
 // paths, checks dependencies, builds the initial model, and starts the Bubble
-// Tea program. It owns process exit codes (via os.Exit) so cmd/fideogo stays a
+// Tea program. It owns process exit codes (via os.Exit) so cmd/fideo stays a
 // thin shell around this package.
 func Run() {
 	opts, err := parseArgs(os.Args[1:])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\nRun 'fideogo --help' for usage.\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\nRun 'fideo --help' for usage.\n", err)
 		os.Exit(1)
 	}
 	if opts.help {

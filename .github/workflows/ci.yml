@@ -45,7 +45,7 @@ jobs:
         run: go vet ./...
 
       - name: Build
-        run: go build ./cmd/fideogo
+        run: go build ./cmd/fideo
 
       # -tags=integration adds the real-ffmpeg encode test to the unit suite.
       # Both runners install ffmpeg above, so this exercises the darwin and linux

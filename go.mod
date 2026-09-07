@@ -1,4 +1,4 @@
-module fideogo
+module fideo
 
 go 1.27.0
 
